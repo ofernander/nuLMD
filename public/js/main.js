@@ -67,22 +67,34 @@ const api = {
     async searchArtist(query, provider = null, limit = 10) {
         const params = new URLSearchParams({ query, limit });
         if (provider) params.append('provider', provider);
-        return this.get(`/search/artist?${params}`);
+        // Use fetch directly - search endpoints don't use /api prefix
+        const response = await fetch(`/search/artist?${params}`);
+        if (!response.ok) throw new Error('Search failed');
+        return response.json();
     },
 
     async searchAlbum(query, artist = null, provider = null, limit = 10) {
         const params = new URLSearchParams({ query, limit });
         if (artist) params.append('artist', artist);
         if (provider) params.append('provider', provider);
-        return this.get(`/search/album?${params}`);
+        // Use fetch directly - search endpoints don't use /api prefix
+        const response = await fetch(`/search/album?${params}`);
+        if (!response.ok) throw new Error('Search failed');
+        return response.json();
     },
 
     async getArtist(mbid) {
-        return this.get(`/artist/${mbid}`);
+        // Use fetch directly - artist endpoint doesn't use /api prefix
+        const response = await fetch(`/artist/${mbid}`);
+        if (!response.ok) throw new Error('Artist fetch failed');
+        return response.json();
     },
 
-    async getAlbum(provider, id) {
-        return this.get(`/album/${provider}/${id}`);
+    async getAlbum(mbid) {
+        // Use fetch directly - album endpoint doesn't use /api prefix
+        const response = await fetch(`/album/${mbid}`);
+        if (!response.ok) throw new Error('Album fetch failed');
+        return response.json();
     },
 
     async getAlbumTracks(provider, id) {

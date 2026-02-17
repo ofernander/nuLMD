@@ -308,7 +308,7 @@ const ui = {
             return;
         }
 
-        resultsDiv.innerHTML = '<p>Searching and fetching full data (like Lidarr does)...</p>';
+        resultsDiv.innerHTML = '<p>Searching and fetching full metadata from MusicBrainz...</p>';
 
         try {
             let searchResults;
@@ -327,11 +327,11 @@ const ui = {
                     let fullData;
                     if (searchType === 'artist') {
                         // Fetch full artist data via the API endpoint Lidarr would use
-                        const response = await fetch(`/api/artist/${result.Id}`);
+                        const response = await fetch(`/artist/${result.Id}`);
                         fullData = await response.json();
                     } else {
                         // Fetch full album data
-                        const response = await fetch(`/api/album/${result.Id}`);
+                        const response = await fetch(`/album/${result.Id}`);
                         fullData = await response.json();
                     }
                     fullResults.push(fullData);
@@ -344,7 +344,7 @@ const ui = {
             // Display results with section headers
             let html = `
                 <div class="alert alert-info">
-                    Showing FULL API response - this is what Lidarr receives
+                    Showing FULL API response
                 </div>
                 <h3>Results (${fullResults.length})</h3>
                 <pre>${JSON.stringify(fullResults, null, 2)}</pre>
