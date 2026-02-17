@@ -1,0 +1,14 @@
+node_modules/
+logs/
+*.log
+data/
+config/config.yml
+.env
+.DS_Store
+*.swp
+.AppleDouble
+.LSOverride
+Icon?
+._*
+*~
+docker-compose.override.yml

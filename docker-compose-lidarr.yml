@@ -1,0 +1,88 @@
+services:
+  lidarr:
+    image: lscr.io/linuxserver/lidarr:latest
+    container_name: lidarr
+    hostname: lidarr
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/New_York
+    volumes:
+      - ./lidarr-config:/config
+      - /path/to/music:/music
+      - /path/to/downloads:/downloads
+    ports:
+      - "8686:8686"
+    restart: unless-stopped
+    networks:
+      - nulmd_default
+
+  nulmd-server:
+    build: .
+    container_name: nulmd-server
+    hostname: nulmd-server
+    ports:
+      - "5001:5001"
+    volumes:
+      - ./config:/app/config
+      - ./logs:/app/logs
+      - ./data/images:/app/data/images
+    environment:
+      - SERVER_URL=http://nulmd-server:5001
+      - PORT=5001
+      - CACHE_ENABLED=true
+      - CACHE_TTL=3600
+      - CACHE_MAX_SIZE=1000
+      - LOG_LEVEL=info
+      - POSTGRES_HOST=nulmd-db
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=nulmd
+      - POSTGRES_USER=nulmd
+      - POSTGRES_PASSWORD=changeme
+    restart: unless-stopped
+    depends_on:
+      nulmd-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:5001/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    networks:
+      - nulmd_default
+
+  nulmd-db:
+    image: postgres:16-alpine
+    container_name: nulmd-db
+    hostname: nulmd-db
+    shm_size: 512m
+    command: >
+      postgres
+      -c shared_buffers=256MB
+      -c effective_cache_size=1GB
+      -c maintenance_work_mem=64MB
+      -c checkpoint_completion_target=0.9
+      -c wal_buffers=16MB
+      -c default_statistics_target=100
+      -c random_page_cost=1.1
+    ports:
+      - "5433:5432"
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_DB=nulmd
+      - POSTGRES_USER=nulmd
+      - POSTGRES_PASSWORD=changeme
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nulmd"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - nulmd_default
+
+networks:
+  nulmd_default:
+    name: nulmd_default

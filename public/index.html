@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>nuLMD - New Lidarr Metadata Server</title>
+    <link rel="stylesheet" href="/css/core.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="header-content">
+                <div style="display: flex; align-items: center; justify-content: space-between; width: 100%;">
+                    <div>
+                        <h1>nuLMD</h1>
+                        <p class="subtitle">New Lidarr Metadata Server</p>
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 1rem;">
+                        <img src="/assets/lidarr.png" alt="Lidarr" style="height: 3rem;">
+                        <img src="/assets/musicbrainz.png" alt="MusicBrainz" style="height: 3rem;">
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <nav class="tabs">
+            <button class="tab active" data-tab="dashboard">Dashboard</button>
+            <button class="tab" data-tab="metadata">Metadata Sources</button>
+            <button class="tab" data-tab="testing">Test API</button>
+        </nav>
+
+        <main>
+            <!-- Dashboard Tab -->
+            <section id="dashboard-tab" class="tab-content active">
+                <div class="card">
+                    <h2>System Status</h2>
+                    <div class="stats-grid">
+                        <div class="stat">
+                            <div class="stat-label">Version</div>
+                            <div class="stat-value" id="dashboardVersion">-</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Uptime</div>
+                            <div class="stat-value" id="dashboardUptime">-</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Database</div>
+                            <div class="stat-value" id="dashboardDbStatus">-</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Active Jobs</div>
+                            <div class="stat-value" id="dashboardActiveJobs">-</div>
+                        </div>
+                    </div>
+                    <div class="stats-grid" style="margin-top: 10px;">
+                        <div class="stat">
+                            <div class="stat-label">Artists Cached</div>
+                            <div class="stat-value" id="dashboardArtistCount">-</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Albums Cached</div>
+                            <div class="stat-value" id="dashboardAlbumCount">-</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Tracks Cached</div>
+                            <div class="stat-value" id="dashboardTrackCount">-</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Memory Usage</div>
+                            <div class="stat-value" id="dashboardMemoryUsage">-</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <h2>Enabled Metadata Providers</h2>
+                    <div id="providerCards" class="provider-grid-simple">
+                        <p>Loading providers...</p>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                        <h2>Live Activity</h2>
+                        <div style="display: flex; gap: 10px; align-items: center;">
+                            <label style="display: flex; align-items: center; gap: 5px; color: var(--text-secondary); font-size: 0.875rem;">
+                                Lines:
+                                <input type="number" id="minLogsInput" value="50" min="10" max="500" 
+                                       style="width: 60px; padding: 4px; background: var(--bg-tertiary); border: 1px solid var(--border); color: var(--text); border-radius: 4px;"
+                                       onchange="ui.minVisibleLogs = parseInt(this.value); ui.lastLogLength = 0;">
+                            </label>
+                            <label style="display: flex; align-items: center; gap: 5px; color: var(--text-secondary); font-size: 0.875rem; cursor: pointer;">
+                                <input type="checkbox" id="debugToggle" onchange="ui.toggleDebugLogging(this.checked)" style="cursor: pointer;">
+                                Debug
+                            </label>
+                            <button class="btn btn-secondary btn-sm" onclick="ui.toggleLogAutoScroll()" id="autoScrollBtn">Auto-scroll: ON</button>
+                            <button class="btn btn-secondary btn-sm" onclick="ui.clearLogs()">Clear</button>
+                        </div>
+                    </div>
+                    <div id="logViewer" class="log-viewer">
+                        <div class="log-loading">Connecting to log stream...</div>
+                    </div>
+                </div>
+            </section>
+
+
+
+            <!-- Metadata Sources Tab -->
+            <section id="metadata-tab" class="tab-content">
+                <div class="card">
+                    <h2>Metadata Sources</h2>
+                    <div class="alert alert-info">
+                        Changes require server restart to take effect.
+                    </div>
+                    <div id="metadataSourcesForm">Loading...</div>
+                </div>
+            </section>
+
+
+
+            <!-- Testing Tab -->
+            <section id="testing-tab" class="tab-content">
+                <div class="card">
+                    <h2>Test Metadata API</h2>
+                    
+                    <div class="form-group">
+                        <label>Search Type</label>
+                        <select id="testSearchType" class="form-control">
+                            <option value="artist">Artist</option>
+                            <option value="album">Album</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Provider (optional)</label>
+                        <select id="testProvider" class="form-control">
+                            <option value="">All Providers</option>
+                            <option value="musicbrainz">MusicBrainz</option>
+                            <!-- <option value="lastfm">Last.fm</option> -->
+                            <!-- <option value="discogs">Discogs</option> -->
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Search Query</label>
+                        <input type="text" id="testQuery" class="form-control" placeholder="e.g., The Beatles">
+                    </div>
+
+                    <div class="form-group">
+                        <label>Limit</label>
+                        <input type="number" id="testLimit" class="form-control" value="1" min="1" max="50">
+                    </div>
+
+                    <button class="btn btn-primary" onclick="ui.testSearch()">Search</button>
+
+                    <div id="testResults" class="test-results"></div>
+                </div>
+            </section>
+        </main>
+
+        <footer>
+            <p>nuLMD v1.0.0 | <a href="https://github.com/ofernander/nuLMD" target="_blank">Github</a></p>
+        </footer>
+    </div>
+
+    <script src="/js/main.js?v=4"></script>
+    <script src="/js/ui.js?v=4"></script>
+</body>
+</html>
