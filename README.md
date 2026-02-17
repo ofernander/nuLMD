@@ -7,15 +7,14 @@ Metadata proxy server for Lidarr
 ## What it does
 
 - Brings functionality back to Lidarr and removes the need for the official Lidarr metadata server/LMD
-- Fetches artist/album metadata directly from MusicBrainz
-- Pulls album art from multiple sources (CoverArtArchive → TheAudioDB → Fanart.tv)
-- Caches everything in PostgreSQL to build local metadata cache of only the metadata you need
-- Serves it to Lidarr by emulating the old Lidarr Metadata Server
+- Fetches artist & album metadata directly from MusicBrainz
+- Caches metadata in PostgreSQL to build local metadata cache of only the metadata you need
+- Caches artist & album art, pulling from multiple sources
+- Serves metadata & images to Lidarr by emulating the old Lidarr Metadata Server API
 
 ## Requirements
 
 - Docker & Docker Compose
-- Fanart.tv API key (optional, for artist images)
 
 ## Installation
 
@@ -140,7 +139,7 @@ services:
       - ./logs:/app/logs
       - ./data/images:/app/data/images
     environment:
-      - SERVER_URL=http://localhost:5001
+      - SERVER_URL=http://nulmd-server:5001
       - PORT=5001
       - CACHE_ENABLED=true
       - CACHE_TTL=3600
@@ -205,38 +204,45 @@ networks:
 
 ## Configuration
 
-### Environment Variables 
-- SERVER_URL=
+### Environment Variables with defaults
+- SERVER_URL=http://localhost:5001
 - PORT=5001
-- CACHE_ENABLED=
-- CACHE_TTL=
-- CACHE_MAX_SIZE=
+- CACHE_ENABLED=true
+- CACHE_TTL=3600
+- CACHE_MAX_SIZE=1000
 - LOG_LEVEL=info
-- POSTGRES_HOST=
-- POSTGRES_PORT=
-- POSTGRES_DB=
-- POSTGRES_USER=
-- POSTGRES_PASSWORD=
+- POSTGRES_HOST=nulmd-db
+- POSTGRES_PORT=5432
+- POSTGRES_DB=nulmd
+- POSTGRES_USER=nulmd
+- POSTGRES_PASSWORD=password
 - MUSICBRAINZ_URL=
 - MUSICBRAINZ_RATE_LIMIT=
 - FANART_API_KEY=
 
-### CoverArtArchive
+## Image Caching
 
-Enable to have nuLMD download covers and build a local image repo, useful for if you need to rebuild Lidarr or care about having a local copy of album covers. If disabled Lidarr will download Album art and store within Lidarr's config dir. 
+Enable CoverArtArchive and Fanart in the settings to have nuLMD cache images locally. Lidarr will first try to grab the images from nuLMD then
+if not found will attempt to download from the source
 
-### Fanart.tv - Needed for fetching artist images
+### CoverArtArchive.org
 
-Add to `docker-compose.yml`:
+Pulls album cover artwork from `https://coverartarchive.org/`
+
+### Fanart.tv
+
+Pulls artist related artwork from `https://fanart.tv`
+
+Add to `docker-compose.yml` or enable within the UI
 
 ```yaml
 environment:
   - FANART_API_KEY=your_key_here
 ```
 
-Get a key: https://fanart.tv/get-an-api-key/
+Get a key: `https://fanart.tv/get-an-api-key/`
 
-### Custom MusicBrainz Server
+## Custom MusicBrainz Server
 
 Enter URL of local MB host. Typically `http://localhost:5000`
 Set rate limit to 0 for none
@@ -244,7 +250,7 @@ Set rate limit to 0 for none
 - MUSICBRAINZ_URL=
 - MUSICBRAINZ_RATE_LIMIT=0
 
-### Lidarr Setup
+## Lidarr Setup
 
 You need the Lidarr image from lscr.io/linuxserver/lidarr which has plugins enabled
 
