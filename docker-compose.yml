@@ -49,7 +49,7 @@ services:
       -c default_statistics_target=100
       -c random_page_cost=1.1
     ports:
-      - "5433:5432"
+      - "5432:5432"
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
     environment:

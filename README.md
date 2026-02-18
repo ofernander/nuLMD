@@ -86,7 +86,7 @@ services:
       -c default_statistics_target=100
       -c random_page_cost=1.1
     ports:
-      - "5433:5432"
+      - "5432:5432"
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
     environment:
@@ -183,7 +183,7 @@ services:
       -c default_statistics_target=100
       -c random_page_cost=1.1
     ports:
-      - "5433:5432"
+      - "5432:5432"
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
     environment:
@@ -260,7 +260,7 @@ You need the nightly Lidarr image from lscr.io/linuxserver/lidarr:nightly which 
 
 Install the Tubifarry plugin https://github.com/TypNull/Tubifarry
 
-Settings → Metadata Sources → Import Lists → Custom
+Settings → Metadata Sources → Custom
 
 URL stand alone - `http://localhost:5001`
 URL with stack - `http://nulmd-server:5001`
