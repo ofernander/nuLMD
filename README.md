@@ -111,7 +111,7 @@ Deploy nuLMD and Lidarr together:
 ```yaml
 services:
   lidarr:
-    image: lscr.io/linuxserver/lidarr:latest
+    image: lscr.io/linuxserver/lidarr:nightly
     container_name: lidarr
     hostname: lidarr
     environment:
@@ -252,7 +252,7 @@ Set rate limit to 0 for none
 
 ## Lidarr Setup
 
-You need the Lidarr image from lscr.io/linuxserver/lidarr which has plugins enabled
+You need the nightly Lidarr image from lscr.io/linuxserver/lidarr:nightly which has plugins enabled
 
 Install the Tubifarry plugin https://github.com/TypNull/Tubifarry
 

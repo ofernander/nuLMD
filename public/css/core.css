@@ -457,6 +457,175 @@ footer a:hover {
     font-size: 0.875rem;
 }
 
+/* Metadata Tree Table */
+.metadata-search {
+    margin-bottom: 1rem;
+}
+
+.metadata-search input {
+    width: 100%;
+    max-width: 400px;
+    padding: 0.75rem;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 0.375rem;
+    color: var(--text);
+    font-size: 1rem;
+}
+
+.metadata-search input:focus {
+    outline: none;
+    border-color: var(--primary);
+}
+
+.metadata-table-wrapper {
+    overflow-x: auto;
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+}
+
+.metadata-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.875rem;
+}
+
+.metadata-table thead {
+    background: var(--bg-tertiary);
+    position: sticky;
+    top: 0;
+    z-index: 10;
+}
+
+.metadata-table th {
+    padding: 0.75rem;
+    text-align: left;
+    font-weight: 600;
+    color: var(--text);
+    border-bottom: 2px solid var(--border);
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+}
+
+.metadata-table th:hover {
+    background: var(--hover-bg);
+}
+
+.metadata-table th.sortable::after {
+    content: ' ⇅';
+    color: var(--text-secondary);
+    font-size: 0.75rem;
+}
+
+.metadata-table th.sorted-asc::after {
+    content: ' ↑';
+    color: var(--primary);
+}
+
+.metadata-table th.sorted-desc::after {
+    content: ' ↓';
+    color: var(--primary);
+}
+
+.metadata-table tbody tr {
+    border-bottom: 1px solid var(--border);
+    transition: background 0.15s;
+}
+
+.metadata-table tbody tr:hover {
+    background: var(--hover-bg);
+}
+
+.metadata-table td {
+    padding: 0.75rem;
+    color: var(--text);
+}
+
+/* Tree hierarchy levels */
+.metadata-table tr.level-0 td:first-child {
+    padding-left: 0.75rem;
+}
+
+.metadata-table tr.level-1 td:first-child {
+    padding-left: 2.5rem;
+}
+
+.metadata-table tr.level-2 td:first-child {
+    padding-left: 4.5rem;
+}
+
+/* Expand/collapse icons */
+.expand-icon {
+    display: inline-block;
+    width: 1rem;
+    height: 1rem;
+    margin-right: 0.5rem;
+    cursor: pointer;
+    color: var(--text-secondary);
+    transition: transform 0.2s;
+}
+
+.expand-icon.expanded {
+    transform: rotate(90deg);
+}
+
+.expand-icon:hover {
+    color: var(--primary);
+}
+
+/* MBID link */
+.mbid-link {
+    font-family: 'Courier New', monospace;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    text-decoration: none;
+    padding: 0.25rem 0.5rem;
+    border-radius: 0.25rem;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    transition: all 0.15s;
+    display: inline-block;
+}
+
+.mbid-link:hover {
+    color: var(--primary);
+    border-color: var(--primary);
+    text-decoration: none;
+}
+
+.mbid-link:active {
+    background: var(--primary);
+    color: white;
+}
+
+/* Refresh button in table */
+.btn-refresh {
+    padding: 0.375rem 0.75rem;
+    font-size: 0.75rem;
+    background: var(--secondary);
+    color: white;
+    border: none;
+    border-radius: 0.25rem;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.btn-refresh:hover {
+    background: var(--primary);
+}
+
+.btn-refresh:disabled {
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    cursor: not-allowed;
+}
+
+/* Hidden rows */
+.metadata-table tr.hidden {
+    display: none;
+}
+
 @media (max-width: 768px) {
     .container {
         padding: 1rem;
@@ -474,5 +643,14 @@ footer a:hover {
     
     .provider-grid-simple {
         flex-direction: column;
+    }
+    
+    .metadata-table {
+        font-size: 0.75rem;
+    }
+    
+    .metadata-table th,
+    .metadata-table td {
+        padding: 0.5rem;
     }
 }

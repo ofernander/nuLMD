@@ -129,7 +129,9 @@ document.addEventListener('DOMContentLoaded', async () => {
             document.getElementById(`${tabName}-tab`).classList.add('active');
             
             // Load tab-specific content
-            if (tabName === 'metadata') {
+            if (tabName === 'browser') {
+                ui.loadMetadataBrowser();
+            } else if (tabName === 'sources') {
                 ui.loadMetadataSources();
             } else if (tabName === 'dashboard') {
                 ui.refreshDashboard();

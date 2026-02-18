@@ -345,6 +345,158 @@ router.post('/restart', (req, res) => {
   }, 100);
 });
 
+// Metadata browser endpoints
+router.get('/metadata/artists', async (req, res, next) => {
+  try {
+    const artists = await database.getAllArtistsWithCounts();
+    res.json(artists);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/metadata/artist/:mbid', async (req, res, next) => {
+  try {
+    const { mbid } = req.params;
+    
+    // Get artist
+    const artist = await database.getArtistWithMetadata(mbid);
+    
+    // Get albums with release status info and secondary types
+    const albumsResult = await database.query(`
+      SELECT 
+        rg.mbid,
+        rg.title,
+        rg.primary_type,
+        rg.secondary_types,
+        rg.first_release_date,
+        rg.last_updated_at,
+        COUNT(DISTINCT r.mbid) as release_count,
+        COUNT(DISTINCT t.mbid) as track_count,
+        (
+          SELECT r2.status
+          FROM releases r2
+          WHERE r2.release_group_mbid = rg.mbid
+          ORDER BY 
+            CASE WHEN r2.status = 'Official' THEN 0 ELSE 1 END,
+            r2.release_date ASC NULLS LAST
+          LIMIT 1
+        ) as first_release_status
+      FROM release_groups rg
+      JOIN artist_release_groups arg ON arg.release_group_mbid = rg.mbid
+      LEFT JOIN releases r ON r.release_group_mbid = rg.mbid
+      LEFT JOIN tracks t ON t.release_mbid = r.mbid
+      WHERE arg.artist_mbid = $1
+      GROUP BY rg.mbid, rg.title, rg.primary_type, rg.secondary_types, rg.first_release_date, rg.last_updated_at
+      ORDER BY rg.first_release_date DESC NULLS LAST
+    `, [mbid]);
+    
+    res.json({
+      artist,
+      albums: albumsResult.rows
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/metadata/album-tracks/:mbid', async (req, res, next) => {
+  try {
+    const { mbid } = req.params;
+    
+    // Query database for tracks from ONLY the first release of this album
+    const result = await database.query(`
+      SELECT 
+        t.mbid,
+        t.title,
+        t.position,
+        t.medium_number,
+        t.length_ms
+      FROM tracks t
+      WHERE t.release_mbid = (
+        SELECT r.mbid
+        FROM releases r
+        WHERE r.release_group_mbid = $1
+        ORDER BY 
+          CASE WHEN r.status = 'Official' THEN 0 ELSE 1 END,
+          r.release_date ASC NULLS LAST
+        LIMIT 1
+      )
+      ORDER BY t.medium_number, t.position
+    `, [mbid]);
+    
+    res.json({
+      tracks: result.rows
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// UI-specific fetch endpoint - fetches EVERYTHING for an artist
+router.post('/ui/fetch-artist/:mbid', async (req, res, next) => {
+  try {
+    const { mbid } = req.params;
+    logger.info(`UI complete artist fetch requested for ${mbid}`);
+    
+    const mbProvider = registry.getProvider('musicbrainz');
+    if (!mbProvider) {
+      throw new Error('MusicBrainz provider not available');
+    }
+    
+    // Fetch and store artist
+    await metaHandler.getArtist(mbid);
+    
+    // Get all albums for this artist
+    const albums = await mbProvider.getArtistAlbums(mbid);
+    logger.info(`Found ${albums.length} albums for artist ${mbid}, fetching all...`);
+    
+    // Fetch each album (release group)
+    for (let i = 0; i < albums.length; i++) {
+      const album = albums[i];
+      try {
+        const fullAlbum = await mbProvider.getReleaseGroup(album.id);
+        await metaHandler.storeReleaseGroup(album.id, fullAlbum, mbid);
+        logger.info(`Stored album ${album.id} (${i + 1}/${albums.length})`);
+        
+        // Get releases for this album
+        const releases = fullAlbum.releases || [];
+        
+        // Fetch first Official release (most likely to have tracks)
+        const officialRelease = releases.find(r => r.status === 'Official');
+        if (officialRelease) {
+          try {
+            const fullRelease = await mbProvider.getRelease(officialRelease.id);
+            await metaHandler.storeRelease(officialRelease.id, fullRelease);
+            logger.info(`Stored first Official release ${officialRelease.id} for album ${album.id}`);
+          } catch (error) {
+            logger.error(`Failed to fetch release ${officialRelease.id}:`, error);
+          }
+        } else if (releases.length > 0) {
+          // No Official release, fetch first available
+          try {
+            const fullRelease = await mbProvider.getRelease(releases[0].id);
+            await metaHandler.storeRelease(releases[0].id, fullRelease);
+            logger.info(`Stored first release ${releases[0].id} for album ${album.id}`);
+          } catch (error) {
+            logger.error(`Failed to fetch release ${releases[0].id}:`, error);
+          }
+        }
+      } catch (error) {
+        logger.error(`Failed to fetch/store album ${album.id}:`, error);
+      }
+    }
+    
+    logger.info(`Completed UI fetch for artist ${mbid}: ${albums.length} albums fetched`);
+    
+    // Return formatted artist with albums
+    const formatted = await lidarr.formatArtist(mbid);
+    res.json(formatted);
+  } catch (error) {
+    next(error);
+  }
+});
+
 // Refresh endpoints
 const bulkRefresher = require('./bulkRefresher');
 

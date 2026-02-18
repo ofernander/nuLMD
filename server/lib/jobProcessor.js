@@ -401,7 +401,7 @@ async function fetchAlbumFull(releaseGroupMbid) {
     }, 'track-artist');
   }
 
-  logger.info(`Completed fetching album ${releaseGroupMbid} with ${releases.length} releases and ${trackArtistIds.size} track artists`);
+  logger.info(`Completed fetching album ${releaseGroupMbid} with ${nonOfficialReleases.length} releases and ${trackArtistIds.size} track artists`);
 }
 
 module.exports = { processJob };

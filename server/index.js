@@ -98,7 +98,7 @@ app.get('/artist/:mbid', async (req, res) => {
       const albums = await mbProvider.getArtistAlbums(mbid);
       logger.info(`Found ${albums.length} albums for artist ${mbid}`);
       
-      // Fetch FIRST FEW albums synchronously (so we have something to return)
+      // Fetch FIRST FEW albums synchronously WITH their first Official release (so we have tracks)
       const albumsToFetchNow = Math.min(3, albums.length);
       for (let i = 0; i < albumsToFetchNow; i++) {
         const album = albums[i];
@@ -106,6 +106,28 @@ app.get('/artist/:mbid', async (req, res) => {
           const fullAlbum = await mbProvider.getReleaseGroup(album.id);
           await metaHandler.storeReleaseGroup(album.id, fullAlbum, mbid);
           logger.info(`Stored album ${album.id} (${i + 1}/${albumsToFetchNow})`);
+          
+          // Also fetch first Official release to get tracks
+          const releases = fullAlbum.releases || [];
+          const officialRelease = releases.find(r => r.status === 'Official');
+          if (officialRelease) {
+            try {
+              const fullRelease = await mbProvider.getRelease(officialRelease.id);
+              await metaHandler.storeRelease(officialRelease.id, fullRelease);
+              logger.info(`Stored first Official release ${officialRelease.id} with tracks for album ${album.id}`);
+            } catch (error) {
+              logger.error(`Failed to fetch release ${officialRelease.id}:`, error);
+            }
+          } else if (releases.length > 0) {
+            // No Official release, fetch first available
+            try {
+              const fullRelease = await mbProvider.getRelease(releases[0].id);
+              await metaHandler.storeRelease(releases[0].id, fullRelease);
+              logger.info(`Stored first release ${releases[0].id} with tracks for album ${album.id}`);
+            } catch (error) {
+              logger.error(`Failed to fetch release ${releases[0].id}:`, error);
+            }
+          }
         } catch (error) {
           logger.error(`Failed to fetch/store album ${album.id}:`, error);
         }

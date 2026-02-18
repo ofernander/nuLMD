@@ -228,9 +228,551 @@ const ui = {
             console.error('Failed to load metadata sources:', error);
             container.innerHTML = '<p class="alert alert-danger">Failed to load metadata sources</p>';
         }
+    },
+
+    async loadMetadataBrowser() {
+        // Load metadata tree
+        await this.loadMetadataTree();
         
         // Load refresh settings
         await this.loadRefreshSettings();
+    },
+
+    async loadMetadataTree() {
+        const container = document.getElementById('metadataTree');
+        container.innerHTML = '<p>Loading metadata...</p>';
+
+        try {
+            const response = await fetch('/api/metadata/artists');
+            const artists = await response.json();
+
+            if (artists.length === 0) {
+                container.innerHTML = '<p>No artists in database</p>';
+                return;
+            }
+
+            // Build table HTML
+            let html = `
+                <div class="metadata-search">
+                    <input type="text" id="metadataSearchInput" placeholder="Search artists..." onkeyup="ui.filterMetadataTree()">
+                    <select id="albumTypeFilter" onchange="ui.applyFilters()" style="margin-left: 1rem; padding: 0.75rem; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 0.375rem; color: var(--text);">
+                        <option value="all">All Types</option>
+                        <option value="Album" selected>Studio Albums</option>
+                        <option value="EP">EPs</option>
+                        <option value="Single">Singles</option>
+                        <option value="Live">Live</option>
+                        <option value="Compilation">Compilations</option>
+                        <option value="Soundtrack">Soundtracks</option>
+                        <option value="Spokenword">Spokenword</option>
+                        <option value="Interview">Interviews</option>
+                        <option value="Audiobook">Audiobooks</option>
+                        <option value="Audio drama">Audio Dramas</option>
+                        <option value="Remix">Remixes</option>
+                        <option value="DJ-mix">DJ Mixes</option>
+                        <option value="Mixtape/Street">Mixtapes</option>
+                        <option value="Demo">Demos</option>
+                    </select>
+                    <select id="releaseStatusFilter" onchange="ui.applyFilters()" style="margin-left: 0.5rem; padding: 0.75rem; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 0.375rem; color: var(--text);">
+                        <option value="all">All Release Types</option>
+                        <option value="Official" selected>Official Only</option>
+                        <option value="Promotion">Promotional Only</option>
+                        <option value="Bootleg">Bootleg Only</option>
+                    </select>
+                </div>
+                <div class="metadata-table-wrapper">
+                    <table class="metadata-table">
+                        <thead>
+                            <tr>
+                                <th class="sortable" onclick="event.stopPropagation(); ui.sortMetadataTree('name')">Name</th>
+                                <th>MBID</th>
+                                <th class="sortable" onclick="event.stopPropagation(); ui.sortMetadataTree('type')">Type</th>
+                                <th class="sortable" onclick="event.stopPropagation(); ui.sortMetadataTree('country')">Country</th>
+                                <th class="sortable" onclick="event.stopPropagation(); ui.sortMetadataTree('album_count')">Albums</th>
+                                <th class="sortable" onclick="event.stopPropagation(); ui.sortMetadataTree('release_count')">Releases</th>
+                                <th class="sortable" onclick="event.stopPropagation(); ui.sortMetadataTree('track_count')">Tracks</th>
+                                <th class="sortable" onclick="event.stopPropagation(); ui.sortMetadataTree('last_updated_at')">Last Updated</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="metadataTableBody">
+            `;
+
+            // Add artist rows
+            for (const artist of artists) {
+                const lastUpdated = artist.last_updated_at ? new Date(artist.last_updated_at).toLocaleDateString() : 'Never';
+                
+                html += `
+                    <tr class="level-0 artist-row" data-artist-id="${artist.mbid}" data-name="${artist.name.toLowerCase()}">
+                        <td>
+                            <span class="expand-icon" onclick="ui.toggleArtistExpand('${artist.mbid}')">▶</span>
+                            ${this.escapeHtml(artist.name)}
+                        </td>
+                        <td><a href="https://musicbrainz.org/artist/${artist.mbid}" target="_blank" class="mbid-link" onclick="event.stopPropagation()" title="View on MusicBrainz">${artist.mbid.substring(0, 8)}...</a></td>
+                        <td>${artist.type || '-'}</td>
+                        <td>${artist.country || '-'}</td>
+                        <td>${artist.album_count}</td>
+                        <td>${artist.release_count}</td>
+                        <td>${artist.track_count}</td>
+                        <td>${lastUpdated}</td>
+                        <td><button class="btn-refresh" onclick="ui.refreshArtistMetadata('${artist.mbid}')">Update</button></td>
+                    </tr>
+                `;
+            }
+
+            html += `
+                        </tbody>
+                    </table>
+                </div>
+            `;
+
+            container.innerHTML = html;
+
+            // Store artists data
+            this.metadataArtists = artists;
+            this.metadataSort = { column: 'name', direction: 'asc' };
+            this.currentAlbumTypeFilter = 'Album'; // Default to Studio Albums Only
+            this.currentReleaseStatusFilter = 'Official'; // Default to Official Only
+
+        } catch (error) {
+            console.error('Failed to load metadata tree:', error);
+            container.innerHTML = '<p class="alert alert-danger">Failed to load metadata</p>';
+        }
+    },
+
+    async toggleArtistExpand(artistMbid) {
+        const row = document.querySelector(`tr[data-artist-id="${artistMbid}"]`);
+        const icon = row.querySelector('.expand-icon');
+        
+        // Check if already expanded
+        if (icon.classList.contains('expanded')) {
+            // Collapse: remove album rows AND their track rows
+            icon.classList.remove('expanded');
+            const albumRows = document.querySelectorAll(`tr[data-parent-artist="${artistMbid}"]`);
+            albumRows.forEach(albumRow => {
+                // If this album was expanded, also remove its tracks
+                const albumId = albumRow.getAttribute('data-album-id');
+                if (albumId) {
+                    const trackRows = document.querySelectorAll(`tr[data-parent-album="${albumId}"]`);
+                    trackRows.forEach(tr => tr.remove());
+                }
+                albumRow.remove();
+            });
+            return;
+        }
+
+        // Expand: fetch and display albums
+        icon.classList.add('expanded');
+        
+        try {
+            const response = await fetch(`/api/metadata/artist/${artistMbid}`);
+            const data = await response.json();
+            const albums = data.albums;
+
+            if (albums.length === 0) {
+                // Insert "no albums" row
+                const noAlbumsRow = document.createElement('tr');
+                noAlbumsRow.className = 'level-1';
+                noAlbumsRow.setAttribute('data-parent-artist', artistMbid);
+                noAlbumsRow.innerHTML = '<td colspan="9" style="color: var(--text-secondary); font-style: italic;">No albums</td>';
+                row.insertAdjacentElement('afterend', noAlbumsRow);
+                return;
+            }
+
+            // Filter albums by type and release status
+            const typeFilter = this.currentAlbumTypeFilter || 'Album';
+            const statusFilter = this.currentReleaseStatusFilter || 'Official';
+            
+            let filteredAlbums = albums;
+            
+            // Apply type filter
+            if (typeFilter !== 'all') {
+                filteredAlbums = filteredAlbums.filter(a => {
+                    const secondaryTypes = a.secondary_types || [];
+                    
+                    // For "Album" filter, show pure studio albums (no secondary types that change the nature)
+                    if (typeFilter === 'Album') {
+                        return a.primary_type === 'Album' && 
+                               !secondaryTypes.includes('Live') && 
+                               !secondaryTypes.includes('Compilation') &&
+                               !secondaryTypes.includes('Soundtrack') &&
+                               !secondaryTypes.includes('Spokenword') &&
+                               !secondaryTypes.includes('Interview') &&
+                               !secondaryTypes.includes('Audiobook') &&
+                               !secondaryTypes.includes('Audio drama') &&
+                               !secondaryTypes.includes('DJ-mix') &&
+                               !secondaryTypes.includes('Mixtape/Street') &&
+                               !secondaryTypes.includes('Demo');
+                    }
+                    
+                    // For secondary type filters (Live, Compilation, Soundtrack, etc.)
+                    // Check if the type appears in secondary_types
+                    const secondaryTypeFilters = ['Live', 'Compilation', 'Soundtrack', 'Spokenword', 
+                                                 'Interview', 'Audiobook', 'Audio drama', 'Remix', 
+                                                 'DJ-mix', 'Mixtape/Street', 'Demo'];
+                    if (secondaryTypeFilters.includes(typeFilter)) {
+                        return secondaryTypes.includes(typeFilter);
+                    }
+                    
+                    // For primary type filters (EP, Single, Broadcast, Other)
+                    // Match primary_type
+                    return a.primary_type === typeFilter;
+                });
+            }
+            
+            // Apply status filter (only if not 'all')
+            if (statusFilter !== 'all') {
+                filteredAlbums = filteredAlbums.filter(a => {
+                    // If no releases fetched yet, treat as 'Official' (assume it will be Official when fetched)
+                    const status = a.first_release_status || 'Official';
+                    return status === statusFilter;
+                });
+            }
+
+            if (filteredAlbums.length === 0) {
+                const noAlbumsRow = document.createElement('tr');
+                noAlbumsRow.className = 'level-1';
+                noAlbumsRow.setAttribute('data-parent-artist', artistMbid);
+                const typeLabel = typeFilter === 'all' ? '' : typeFilter + ' ';
+                const statusLabel = statusFilter === 'all' ? '' : statusFilter + ' ';
+                noAlbumsRow.innerHTML = `<td colspan="9" style="color: var(--text-secondary); font-style: italic;">No ${statusLabel}${typeLabel}albums</td>`;
+                row.insertAdjacentElement('afterend', noAlbumsRow);
+                return;
+            }
+
+            // Insert album rows after artist row
+            let insertAfter = row;
+            for (const album of filteredAlbums) {
+                const albumRow = document.createElement('tr');
+                albumRow.className = 'level-1 album-row';
+                albumRow.setAttribute('data-parent-artist', artistMbid);
+                albumRow.setAttribute('data-album-id', album.mbid);
+                
+                const releaseDate = album.first_release_date ? new Date(album.first_release_date).toLocaleDateString() : 'Unknown';
+                
+                albumRow.innerHTML = `
+                    <td>
+                        <span class="expand-icon" onclick="ui.toggleAlbumExpand('${album.mbid}')">▶</span>
+                        ${this.escapeHtml(album.title)}
+                    </td>
+                    <td><a href="https://musicbrainz.org/release-group/${album.mbid}" target="_blank" class="mbid-link" onclick="event.stopPropagation()" title="View on MusicBrainz">${album.mbid.substring(0, 8)}...</a></td>
+                    <td>${album.primary_type || '-'}</td>
+                    <td>${releaseDate}</td>
+                    <td>${album.release_count}</td>
+                    <td>${album.track_count}</td>
+                    <td colspan="3"></td>
+                `;
+                
+                insertAfter.insertAdjacentElement('afterend', albumRow);
+                insertAfter = albumRow;
+            }
+
+        } catch (error) {
+            console.error('Failed to load albums:', error);
+            this.showError('Failed to load albums');
+        }
+    },
+
+    async toggleAlbumExpand(albumMbid) {
+        const row = document.querySelector(`tr[data-album-id="${albumMbid}"]`);
+        const icon = row.querySelector('.expand-icon');
+        
+        // Check if already expanded
+        if (icon.classList.contains('expanded')) {
+            // Collapse: remove track rows
+            icon.classList.remove('expanded');
+            const trackRows = document.querySelectorAll(`tr[data-parent-album="${albumMbid}"]`);
+            trackRows.forEach(r => r.remove());
+            return;
+        }
+
+        // Expand: fetch track data from database API (not Lidarr endpoint)
+        icon.classList.add('expanded');
+        
+        try {
+            // Fetch tracks from database via metadata API
+            const response = await fetch(`/api/metadata/album-tracks/${albumMbid}`);
+            const trackData = await response.json();
+            const tracks = trackData.tracks || [];
+
+            if (tracks.length === 0) {
+                const noTracksRow = document.createElement('tr');
+                noTracksRow.className = 'level-2';
+                noTracksRow.setAttribute('data-parent-album', albumMbid);
+                noTracksRow.innerHTML = '<td colspan="9" style="color: var(--text-secondary); font-style: italic;">No tracks in database</td>';
+                row.insertAdjacentElement('afterend', noTracksRow);
+                return;
+            }
+            
+            // Display tracks
+            let insertAfter = row;
+            for (const track of tracks) {
+                const trackRow = document.createElement('tr');
+                trackRow.className = 'level-2';
+                trackRow.setAttribute('data-parent-album', albumMbid);
+                
+                const position = `${track.medium_number}-${track.position}`;
+                const duration = track.length_ms ? this.formatDuration(track.length_ms / 1000) : '-';
+                
+                trackRow.innerHTML = `
+                    <td>${position}. ${this.escapeHtml(track.title)}</td>
+                    <td colspan="7"></td>
+                    <td>${duration}</td>
+                `;
+                
+                insertAfter.insertAdjacentElement('afterend', trackRow);
+                insertAfter = trackRow;
+            }
+
+        } catch (error) {
+            console.error('Failed to load tracks:', error);
+            this.showError('Failed to load tracks');
+        }
+    },
+
+    formatDuration(seconds) {
+        const mins = Math.floor(seconds / 60);
+        const secs = Math.floor(seconds % 60);
+        return `${mins}:${secs.toString().padStart(2, '0')}`;
+    },
+
+    applyFilters() {
+        // Get current filter values
+        const typeFilter = document.getElementById('albumTypeFilter')?.value || 'Album';
+        const statusFilter = document.getElementById('releaseStatusFilter')?.value || 'Official';
+        
+        this.currentAlbumTypeFilter = typeFilter;
+        this.currentReleaseStatusFilter = statusFilter;
+        
+        // Close any expanded rows since filters changed
+        const expandedIcons = document.querySelectorAll('.expand-icon.expanded');
+        expandedIcons.forEach(icon => {
+            const row = icon.closest('tr');
+            const artistId = row.getAttribute('data-artist-id');
+            const albumId = row.getAttribute('data-album-id');
+            
+            if (artistId) {
+                // Collapse artist
+                icon.classList.remove('expanded');
+                const childRows = document.querySelectorAll(`tr[data-parent-artist="${artistId}"]`);
+                childRows.forEach(r => r.remove());
+            } else if (albumId) {
+                // Collapse album
+                icon.classList.remove('expanded');
+                const trackRows = document.querySelectorAll(`tr[data-parent-album="${albumId}"]`);
+                trackRows.forEach(r => r.remove());
+            }
+        });
+    },
+
+    rebuildMetadataTable() {
+        const container = document.getElementById('metadataTree');
+        if (!container) return;
+        
+        // Rebuild entire table structure
+        let html = `
+            <div class="metadata-search">
+                <input type="text" id="metadataSearchInput" placeholder="Search artists..." onkeyup="ui.filterMetadataTree()">
+                <select id="albumTypeFilter" onchange="ui.applyFilters()" style="margin-left: 1rem; padding: 0.75rem; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 0.375rem; color: var(--text);">
+                    <option value="all" ${this.currentAlbumTypeFilter === 'all' ? 'selected' : ''}>All Types</option>
+                    <option value="Album" ${this.currentAlbumTypeFilter === 'Album' ? 'selected' : ''}>Studio Albums</option>
+                    <option value="EP" ${this.currentAlbumTypeFilter === 'EP' ? 'selected' : ''}>EPs</option>
+                    <option value="Single" ${this.currentAlbumTypeFilter === 'Single' ? 'selected' : ''}>Singles</option>
+                    <option value="Live" ${this.currentAlbumTypeFilter === 'Live' ? 'selected' : ''}>Live</option>
+                    <option value="Compilation" ${this.currentAlbumTypeFilter === 'Compilation' ? 'selected' : ''}>Compilations</option>
+                    <option value="Soundtrack" ${this.currentAlbumTypeFilter === 'Soundtrack' ? 'selected' : ''}>Soundtracks</option>
+                    <option value="Spokenword" ${this.currentAlbumTypeFilter === 'Spokenword' ? 'selected' : ''}>Spokenword</option>
+                    <option value="Interview" ${this.currentAlbumTypeFilter === 'Interview' ? 'selected' : ''}>Interviews</option>
+                    <option value="Audiobook" ${this.currentAlbumTypeFilter === 'Audiobook' ? 'selected' : ''}>Audiobooks</option>
+                    <option value="Audio drama" ${this.currentAlbumTypeFilter === 'Audio drama' ? 'selected' : ''}>Audio Dramas</option>
+                    <option value="Remix" ${this.currentAlbumTypeFilter === 'Remix' ? 'selected' : ''}>Remixes</option>
+                    <option value="DJ-mix" ${this.currentAlbumTypeFilter === 'DJ-mix' ? 'selected' : ''}>DJ Mixes</option>
+                    <option value="Mixtape/Street" ${this.currentAlbumTypeFilter === 'Mixtape/Street' ? 'selected' : ''}>Mixtapes</option>
+                    <option value="Demo" ${this.currentAlbumTypeFilter === 'Demo' ? 'selected' : ''}>Demos</option>
+                </select>
+                    <select id="releaseStatusFilter" onchange="ui.applyFilters()" style="margin-left: 0.5rem; padding: 0.75rem; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 0.375rem; color: var(--text);">
+                        <option value="all" ${this.currentReleaseStatusFilter === 'all' ? 'selected' : ''}>All Release Types</option>
+                        <option value="Official" ${this.currentReleaseStatusFilter === 'Official' ? 'selected' : ''}>Official Only</option>
+                        <option value="Promotion" ${this.currentReleaseStatusFilter === 'Promotion' ? 'selected' : ''}>Promotional Only</option>
+                        <option value="Bootleg" ${this.currentReleaseStatusFilter === 'Bootleg' ? 'selected' : ''}>Bootleg Only</option>
+                    </select>
+            </div>
+            <div class="metadata-table-wrapper">
+                <table class="metadata-table">
+                    <thead>
+                        <tr>
+                            <th class="sortable" onclick="event.stopPropagation(); ui.sortMetadataTree('name')">Name</th>
+                            <th>MBID</th>
+                            <th class="sortable" onclick="event.stopPropagation(); ui.sortMetadataTree('type')">Type</th>
+                            <th class="sortable" onclick="event.stopPropagation(); ui.sortMetadataTree('country')">Country</th>
+                            <th class="sortable" onclick="event.stopPropagation(); ui.sortMetadataTree('album_count')">Albums</th>
+                            <th class="sortable" onclick="event.stopPropagation(); ui.sortMetadataTree('release_count')">Releases</th>
+                            <th class="sortable" onclick="event.stopPropagation(); ui.sortMetadataTree('track_count')">Tracks</th>
+                            <th class="sortable" onclick="event.stopPropagation(); ui.sortMetadataTree('last_updated_at')">Last Updated</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="metadataTableBody">
+        `;
+        
+        for (const artist of this.metadataArtists) {
+            const lastUpdated = artist.last_updated_at ? new Date(artist.last_updated_at).toLocaleDateString() : 'Never';
+            
+            html += `
+                <tr class="level-0 artist-row" data-artist-id="${artist.mbid}" data-name="${artist.name.toLowerCase()}">
+                    <td>
+                        <span class="expand-icon" onclick="ui.toggleArtistExpand('${artist.mbid}')">▶</span>
+                        ${this.escapeHtml(artist.name)}
+                    </td>
+                    <td><a href="https://musicbrainz.org/artist/${artist.mbid}" target="_blank" class="mbid-link" onclick="event.stopPropagation()" title="View on MusicBrainz">${artist.mbid.substring(0, 8)}...</a></td>
+                    <td>${artist.type || '-'}</td>
+                    <td>${artist.country || '-'}</td>
+                    <td>${artist.album_count}</td>
+                    <td>${artist.release_count}</td>
+                    <td>${artist.track_count}</td>
+                    <td>${lastUpdated}</td>
+                    <td><button class="btn-refresh" onclick="ui.refreshArtistMetadata('${artist.mbid}')">Update</button></td>
+                </tr>
+            `;
+        }
+        
+        html += `
+                    </tbody>
+                </table>
+            </div>
+        `;
+        
+        container.innerHTML = html;
+    },
+
+    filterMetadataTree() {
+        const searchInput = document.getElementById('metadataSearchInput');
+        const filter = searchInput.value.toLowerCase();
+        const rows = document.querySelectorAll('.artist-row');
+
+        rows.forEach(row => {
+            const name = row.getAttribute('data-name');
+            if (name.includes(filter)) {
+                row.style.display = '';
+            } else {
+                row.style.display = 'none';
+                // Also hide child rows
+                const artistId = row.getAttribute('data-artist-id');
+                const childRows = document.querySelectorAll(`tr[data-parent-artist="${artistId}"]`);
+                childRows.forEach(child => child.style.display = 'none');
+            }
+        });
+    },
+
+    sortMetadataTree(column) {
+        const tbody = document.getElementById('metadataTableBody');
+        if (!this.metadataArtists) return;
+
+        // Toggle sort direction
+        if (this.metadataSort.column === column) {
+            this.metadataSort.direction = this.metadataSort.direction === 'asc' ? 'desc' : 'asc';
+        } else {
+            this.metadataSort.column = column;
+            this.metadataSort.direction = 'asc';
+        }
+
+        // Sort artists
+        const sorted = [...this.metadataArtists].sort((a, b) => {
+            let aVal = a[column];
+            let bVal = b[column];
+
+            // Handle nulls
+            if (aVal === null || aVal === undefined) aVal = '';
+            if (bVal === null || bVal === undefined) bVal = '';
+
+            // String comparison for text columns
+            if (typeof aVal === 'string') {
+                aVal = aVal.toLowerCase();
+                bVal = bVal.toLowerCase();
+            }
+
+            if (aVal < bVal) return this.metadataSort.direction === 'asc' ? -1 : 1;
+            if (aVal > bVal) return this.metadataSort.direction === 'asc' ? 1 : -1;
+            return 0;
+        });
+
+        // Update table headers
+        document.querySelectorAll('.metadata-table th').forEach(th => {
+            th.classList.remove('sorted-asc', 'sorted-desc');
+        });
+        const headerMap = {
+            'name': 0,
+            'type': 2,
+            'country': 3,
+            'album_count': 4,
+            'release_count': 5,
+            'track_count': 6,
+            'last_updated_at': 7
+        };
+        const thIndex = headerMap[column];
+        if (thIndex !== undefined) {
+            const th = document.querySelectorAll('.metadata-table th')[thIndex];
+            th.classList.add(this.metadataSort.direction === 'asc' ? 'sorted-asc' : 'sorted-desc');
+        }
+
+        // Rebuild tbody
+        this.metadataArtists = sorted;
+        tbody.innerHTML = '';
+        
+        for (const artist of sorted) {
+            const lastUpdated = artist.last_updated_at ? new Date(artist.last_updated_at).toLocaleDateString() : 'Never';
+            
+            const row = document.createElement('tr');
+            row.className = 'level-0 artist-row';
+            row.setAttribute('data-artist-id', artist.mbid);
+            row.setAttribute('data-name', artist.name.toLowerCase());
+            
+            row.innerHTML = `
+                <td>
+                    <span class="expand-icon" onclick="ui.toggleArtistExpand('${artist.mbid}')">▶</span>
+                    ${this.escapeHtml(artist.name)}
+                </td>
+                <td><span class="mbid-copy" onclick="event.stopPropagation(); ui.copyToClipboard('${artist.mbid}')" title="Click to copy MBID">${artist.mbid.substring(0, 8)}...</span></td>
+                <td>${artist.type || '-'}</td>
+                <td>${artist.country || '-'}</td>
+                <td>${artist.album_count}</td>
+                <td>${artist.release_count}</td>
+                <td>${artist.track_count}</td>
+                <td>${lastUpdated}</td>
+                <td><button class="btn-refresh" onclick="ui.refreshArtistMetadata('${artist.mbid}')">Update</button></td>
+            `;
+            
+            tbody.appendChild(row);
+        }
+    },
+
+    async refreshArtistMetadata(mbid) {
+        const btn = event.target;
+        btn.disabled = true;
+        btn.textContent = 'Updating...';
+
+        try {
+            const response = await fetch(`/api/refresh/artist/${mbid}`, { method: 'POST' });
+            if (!response.ok) throw new Error('Update failed');
+            
+            this.showSuccess('Artist metadata updated');
+            
+            // Reload metadata tree after short delay
+            setTimeout(() => this.loadMetadataTree(), 1000);
+        } catch (error) {
+            console.error('Failed to update artist:', error);
+            this.showError('Failed to update artist metadata');
+            btn.disabled = false;
+            btn.textContent = 'Update';
+        }
+    },
+
+    copyToClipboard(text) {
+        navigator.clipboard.writeText(text).then(() => {
+            this.showSuccess('MBID copied to clipboard');
+        }).catch(err => {
+            console.error('Failed to copy:', err);
+            this.showError('Failed to copy MBID');
+        });
     },
 
     async loadRefreshSettings() {
@@ -391,63 +933,71 @@ const ui = {
 
 
     async testSearch() {
-        const searchType = document.getElementById('testSearchType').value;
-        const provider = document.getElementById('testProvider').value;
         const query = document.getElementById('testQuery').value;
         const limit = parseInt(document.getElementById('testLimit').value);
         const resultsDiv = document.getElementById('testResults');
 
         if (!query) {
-            resultsDiv.innerHTML = '<p class="alert alert-danger">Please enter a search query</p>';
+            resultsDiv.innerHTML = '<p class="alert alert-danger">Please enter an artist name</p>';
             return;
         }
 
-        resultsDiv.innerHTML = '<p>Searching and fetching full metadata from MusicBrainz...</p>';
+        resultsDiv.innerHTML = '<p>Searching MusicBrainz for artists...</p>';
 
         try {
-            let searchResults;
-            if (searchType === 'artist') {
-                searchResults = await api.searchArtist(query, provider || null, limit);
-            } else {
-                searchResults = await api.searchAlbum(query, null, provider || null, limit);
+            // Search for artists first
+            const searchResults = await api.searchArtist(query, null, limit);
+            
+            if (searchResults.length === 0) {
+                resultsDiv.innerHTML = '<p class="alert alert-info">No artists found matching "' + query + '"</p>';
+                return;
             }
 
-            // Now fetch FULL data for each result (mimics what Lidarr does)
-            resultsDiv.innerHTML = '<p>Found ' + searchResults.length + ' results. Fetching full metadata...</p>';
+            resultsDiv.innerHTML = `<p>Found ${searchResults.length} artist(s). Fetching complete metadata (albums + tracks)...</p>`;
             
             const fullResults = [];
-            for (const result of searchResults) {
+            for (let i = 0; i < searchResults.length; i++) {
+                const result = searchResults[i];
                 try {
-                    let fullData;
-                    if (searchType === 'artist') {
-                        // Fetch full artist data via the API endpoint Lidarr would use
-                        const response = await fetch(`/artist/${result.Id}`);
-                        fullData = await response.json();
-                    } else {
-                        // Fetch full album data
-                        const response = await fetch(`/album/${result.Id}`);
-                        fullData = await response.json();
-                    }
+                    resultsDiv.innerHTML = `<p>Fetching ${i + 1}/${searchResults.length}: ${result.ArtistName}...</p>`;
+                    
+                    // Use UI-specific endpoint that fetches EVERYTHING
+                    const response = await fetch(`/api/ui/fetch-artist/${result.Id}`, { method: 'POST' });
+                    if (!response.ok) throw new Error('Fetch failed');
+                    
+                    const fullData = await response.json();
                     fullResults.push(fullData);
                 } catch (error) {
                     console.error(`Failed to fetch full data for ${result.Id}:`, error);
-                    fullResults.push({ ...result, _error: 'Failed to fetch full data' });
+                    fullResults.push({ ...result, _error: error.message });
                 }
             }
 
-            // Display results with section headers
+            // Display results
             let html = `
-                <div class="alert alert-info">
-                    Showing FULL API response
+                <div class="alert alert-success">
+                    ✓ Successfully fetched and stored ${fullResults.length} artist(s) with all albums and tracks. View in Metadata Browser tab.
                 </div>
-                <h3>Results (${fullResults.length})</h3>
-                <pre>${JSON.stringify(fullResults, null, 2)}</pre>
+                <h3>Fetched Artists</h3>
+                <ul>
             `;
+            
+            fullResults.forEach(result => {
+                if (result._error) {
+                    html += `<li><strong>${result.ArtistName}</strong> - <span style="color: var(--danger);">Error: ${result._error}</span></li>`;
+                } else {
+                    const albumCount = result.Albums?.length || 0;
+                    const trackCount = result.Albums?.reduce((sum, album) => sum + (album.Tracks?.length || 0), 0) || 0;
+                    html += `<li><strong>${result.ArtistName}</strong> - ${albumCount} albums, ${trackCount} tracks</li>`;
+                }
+            });
+            
+            html += '</ul>';
             
             resultsDiv.innerHTML = html;
         } catch (error) {
-            console.error('Search failed:', error);
-            resultsDiv.innerHTML = `<p class="alert alert-danger">Search failed: ${error.message}</p>`;
+            console.error('Fetch failed:', error);
+            resultsDiv.innerHTML = `<p class="alert alert-danger">Fetch failed: ${error.message}</p>`;
         }
     },
 

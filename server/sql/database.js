@@ -237,6 +237,69 @@ class Database {
     const result = await this.query('SELECT mbid FROM artists ORDER BY last_accessed_at DESC');
     return result.rows.map(row => row.mbid);
   }
+
+  // Metadata browser methods
+  async getAllArtistsWithCounts() {
+    const result = await this.query(`
+      SELECT 
+        a.mbid,
+        a.name,
+        a.sort_name,
+        a.type,
+        a.country,
+        a.last_updated_at,
+        a.ttl_expires_at,
+        a.last_accessed_at,
+        COUNT(DISTINCT arg.release_group_mbid) as album_count,
+        COUNT(DISTINCT r.mbid) as release_count,
+        COUNT(DISTINCT t.mbid) as track_count
+      FROM artists a
+      LEFT JOIN artist_release_groups arg ON arg.artist_mbid = a.mbid
+      LEFT JOIN releases r ON r.release_group_mbid = arg.release_group_mbid
+      LEFT JOIN tracks t ON t.release_mbid = r.mbid
+      GROUP BY a.mbid, a.name, a.sort_name, a.type, a.country, a.last_updated_at, a.ttl_expires_at, a.last_accessed_at
+      ORDER BY a.last_accessed_at DESC NULLS LAST
+    `);
+    return result.rows;
+  }
+
+  async getArtistWithMetadata(mbid) {
+    const result = await this.query(`
+      SELECT 
+        a.*,
+        COUNT(DISTINCT arg.release_group_mbid) as album_count,
+        COUNT(DISTINCT r.mbid) as release_count,
+        COUNT(DISTINCT t.mbid) as track_count
+      FROM artists a
+      LEFT JOIN artist_release_groups arg ON arg.artist_mbid = a.mbid
+      LEFT JOIN releases r ON r.release_group_mbid = arg.release_group_mbid
+      LEFT JOIN tracks t ON t.release_mbid = r.mbid
+      WHERE a.mbid = $1
+      GROUP BY a.mbid
+    `, [mbid]);
+    return result.rows[0];
+  }
+
+  async getArtistAlbums(mbid) {
+    const result = await this.query(`
+      SELECT 
+        rg.mbid,
+        rg.title,
+        rg.primary_type,
+        rg.first_release_date,
+        rg.last_updated_at,
+        COUNT(DISTINCT r.mbid) as release_count,
+        COUNT(DISTINCT t.mbid) as track_count
+      FROM release_groups rg
+      JOIN artist_release_groups arg ON arg.release_group_mbid = rg.mbid
+      LEFT JOIN releases r ON r.release_group_mbid = rg.mbid
+      LEFT JOIN tracks t ON t.release_mbid = r.mbid
+      WHERE arg.artist_mbid = $1
+      GROUP BY rg.mbid, rg.title, rg.primary_type, rg.first_release_date, rg.last_updated_at
+      ORDER BY rg.first_release_date DESC NULLS LAST
+    `, [mbid]);
+    return result.rows;
+  }
 }
 
 module.exports = new Database();
