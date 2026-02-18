@@ -212,6 +212,16 @@ CREATE TABLE IF NOT EXISTS external_ids (
 -- TRACKING TABLES
 -- ============================================================================
 
+-- Bulk refresh tracking table
+CREATE TABLE IF NOT EXISTS bulk_refresh_log (
+    id SERIAL PRIMARY KEY,
+    started_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+    completed_at TIMESTAMP WITH TIME ZONE,
+    artists_refreshed INTEGER DEFAULT 0,
+    status VARCHAR(20) NOT NULL DEFAULT 'running',
+    CHECK (status IN ('running', 'completed', 'failed'))
+);
+
 -- Sync logs table
 CREATE TABLE IF NOT EXISTS sync_logs (
     id BIGSERIAL PRIMARY KEY,

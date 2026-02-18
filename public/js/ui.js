@@ -228,9 +228,103 @@ const ui = {
             console.error('Failed to load metadata sources:', error);
             container.innerHTML = '<p class="alert alert-danger">Failed to load metadata sources</p>';
         }
+        
+        // Load refresh settings
+        await this.loadRefreshSettings();
     },
 
+    async loadRefreshSettings() {
+        const statusDiv = document.getElementById('refreshStatus');
+        const formDiv = document.getElementById('refreshSettingsForm');
 
+        try {
+            const [status, config] = await Promise.all([
+                fetch('/api/refresh/status').then(r => r.json()),
+                api.getConfig()
+            ]);
+
+            // Display status
+            let statusHtml = '<div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px;">';
+            
+            if (status.lastRefresh) {
+                const lastRefreshDate = new Date(status.lastRefresh).toLocaleDateString();
+                statusHtml += `<div><strong>Last Bulk Refresh:</strong> ${lastRefreshDate}</div>`;
+                statusHtml += `<div><strong>Days Since Refresh:</strong> ${status.daysSinceRefresh}</div>`;
+                statusHtml += `<div><strong>Next Refresh Due:</strong> ${status.nextRefreshDue} days</div>`;
+            } else {
+                statusHtml += '<div><strong>Last Bulk Refresh:</strong> Never</div>';
+                statusHtml += '<div><strong>Next Refresh Due:</strong> On next scheduled check</div>';
+            }
+            
+            statusHtml += '</div>';
+            statusDiv.innerHTML = statusHtml;
+
+            // Display settings form
+            const artistTTL = config.refresh?.artistTTL || 7;
+            const bulkInterval = config.refresh?.bulkRefreshInterval || 180;
+
+            let formHtml = '';
+            formHtml += '<div class="form-group">';
+            formHtml += '<label for="refresh.artistTTL">Artist TTL (days)</label>';
+            formHtml += `<input type="number" class="form-control" id="refresh.artistTTL" value="${artistTTL}" min="1" max="365">`;
+            formHtml += '<small class="form-text">Days before artist data expires and refreshes on next access</small>';
+            formHtml += '</div>';
+
+            formHtml += '<div class="form-group">';
+            formHtml += '<label for="refresh.bulkRefreshInterval">Bulk Refresh Interval (days)</label>';
+            formHtml += `<input type="number" class="form-control" id="refresh.bulkRefreshInterval" value="${bulkInterval}" min="1" max="365">`;
+            formHtml += '<small class="form-text">Days between automatic bulk refresh of all artists</small>';
+            formHtml += '</div>';
+
+            formHtml += '<div style="display: flex; gap: 10px;">';
+            formHtml += '<button class="btn btn-primary" onclick="ui.saveRefreshSettings()">Save Settings</button>';
+            formHtml += `<button class="btn btn-secondary" onclick="ui.triggerBulkRefresh()" ${status.isRunning ? 'disabled' : ''}>Refresh All Artists Now</button>`;
+            formHtml += '</div>';
+
+            formDiv.innerHTML = formHtml;
+
+        } catch (error) {
+            console.error('Failed to load refresh settings:', error);
+            statusDiv.innerHTML = '<p class="alert alert-danger">Failed to load refresh status</p>';
+            formDiv.innerHTML = '';
+        }
+    },
+
+    async saveRefreshSettings() {
+        try {
+            const config = {
+                refresh: {
+                    artistTTL: parseInt(document.getElementById('refresh.artistTTL').value),
+                    bulkRefreshInterval: parseInt(document.getElementById('refresh.bulkRefreshInterval').value)
+                }
+            };
+
+            await api.updateConfig(config);
+            this.showSuccess('Refresh settings saved. Restart required.');
+        } catch (error) {
+            console.error('Failed to save refresh settings:', error);
+            this.showError('Failed to save refresh settings');
+        }
+    },
+
+    async triggerBulkRefresh() {
+        if (!confirm('Start bulk refresh of all artists? This may take a while.')) {
+            return;
+        }
+
+        try {
+            const response = await fetch('/api/refresh/all', { method: 'POST' });
+            if (!response.ok) throw new Error('Bulk refresh failed');
+            
+            this.showSuccess('Bulk refresh started in background');
+            
+            // Reload settings to show updated status
+            setTimeout(() => this.loadRefreshSettings(), 1000);
+        } catch (error) {
+            console.error('Failed to trigger bulk refresh:', error);
+            this.showError('Failed to start bulk refresh');
+        }
+    },
 
     async saveMetadataSources() {
         try {

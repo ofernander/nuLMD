@@ -108,52 +108,32 @@ router.get('/artist/:mbid', async (req, res, next) => {
     const { mbid } = req.params;
 
     // Check if we have the artist in DB
-    logger.info(`Checking database for artist ${mbid}`);
     const artist = await database.getArtist(mbid);
-    logger.info(`Artist found in DB: ${!!artist}`);
 
-    // If we have artist data, check if it needs refresh
     if (artist) {
-      const needsRefresh = await database.artistNeedsRefresh(artist);
+      // Artist exists - check if TTL expired (7 days)
+      const now = new Date();
+      const ttlExpired = artist.ttl_expires_at && new Date(artist.ttl_expires_at) < now;
       
-      if (needsRefresh) {
-        // Queue background refresh job
-        await metadataJobQueue.queueJob('artist_releases', 'artist', mbid, 10);
-        const reason = !artist.fetch_complete ? 'incomplete fetch' : 'data > 30 days old';
-        logger.info(`Queued refresh job for artist ${mbid} (${reason})`);
+      if (ttlExpired) {
+        logger.info(`Artist ${mbid} TTL expired, refreshing from MusicBrainz`);
+        await metaHandler.refreshArtist(mbid);
       }
       
-      // Return formatted data using Lidarr formatter
+      // Update access tracking
       await database.updateArtistAccess(mbid);
+      
+      // Return formatted data
       const formatted = await lidarr.formatArtist(mbid);
-      
-      // Add status flags
-      if (!artist.fetch_complete) {
-        formatted._incomplete = true;
-        formatted._status = `Fetching releases in background (${formatted.Albums.length} so far)`;
-      }
-      
-      if (needsRefresh && artist.fetch_complete) {
-        formatted._refreshing = true;
-        formatted._status = 'Checking for new releases in background';
-      }
-      
       return res.json(formatted);
     }
 
-    // No data at all - fetch artist immediately and queue releases for background
-    logger.info(`No data for artist ${mbid}, fetching immediately`);
-    const result = await metaHandler.getArtist(mbid);
+    // No data at all - fetch artist immediately
+    logger.info(`Artist ${mbid} not in DB, fetching from MusicBrainz`);
+    await metaHandler.getArtist(mbid);
     
-    // Queue background job for full release data
-    await metadataJobQueue.queueJob('artist_releases', 'artist', mbid, 10);
-    logger.info(`Queued background job to fetch releases for NEW artist ${mbid}`);
-    
-    // Format and return
+    // Return formatted data
     const formatted = await lidarr.formatArtist(mbid);
-    formatted._incomplete = true;
-    formatted._status = 'Fetching releases in background';
-    
     res.json(formatted);
   } catch (error) {
     next(error);
@@ -363,6 +343,44 @@ router.post('/restart', (req, res) => {
     logger.info('Exiting process for restart (Docker will restart container)');
     process.exit(0);
   }, 100);
+});
+
+// Refresh endpoints
+const bulkRefresher = require('./bulkRefresher');
+
+router.get('/refresh/status', async (req, res, next) => {
+  try {
+    const status = await bulkRefresher.getStatus();
+    res.json(status);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/refresh/artist/:mbid', async (req, res, next) => {
+  try {
+    const { mbid } = req.params;
+    logger.info(`Manual refresh requested for artist ${mbid}`);
+    
+    await metaHandler.refreshArtist(mbid);
+    
+    res.json({ success: true, message: `Artist ${mbid} refreshed successfully` });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/refresh/all', async (req, res, next) => {
+  try {
+    // Start async, don't wait
+    bulkRefresher.triggerManualRefresh().catch(err => {
+      logger.error('Manual bulk refresh failed:', err);
+    });
+    
+    res.json({ success: true, message: 'Bulk refresh started in background' });
+  } catch (error) {
+    next(error);
+  }
 });
 
 // Log tail endpoint

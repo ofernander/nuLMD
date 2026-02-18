@@ -78,8 +78,9 @@ class ArtistService {
   }
   
   async storeArtist(mbid, data, isFullData = false) {
+    const config = require('./config');
     const now = new Date();
-    const ttlDays = 7;
+    const ttlDays = config.get('refresh.artistTTL', 7);
     const ttlExpires = new Date(now.getTime() + (ttlDays * 24 * 60 * 60 * 1000));
     
     // Extract fields - handle both search results and full artist data
@@ -344,8 +345,9 @@ class ArtistService {
   }
   
   async storeReleaseGroup(mbid, data, artistMbid) {
+    const config = require('./config');
     const now = new Date();
-    const ttlDays = 7;
+    const ttlDays = config.get('refresh.artistTTL', 7);
     const ttlExpires = new Date(now.getTime() + (ttlDays * 24 * 60 * 60 * 1000));
     
     // Date is already normalized in normalizeReleaseGroup
@@ -766,6 +768,49 @@ class ArtistService {
         JSON.stringify(artistCredit)
       ]);
     }
+  }
+  
+  /**
+   * Force refresh artist data from MusicBrainz (ignores TTL)
+   * Used when TTL expires or manual refresh requested
+   */
+  async refreshArtist(mbid) {
+    logger.info(`Refreshing artist ${mbid} from MusicBrainz (TTL expired or manual refresh)`);
+    
+    const mbProvider = registry.getProvider('musicbrainz');
+    if (!mbProvider) {
+      throw new Error('MusicBrainz provider not available');
+    }
+    
+    // Fetch fresh artist data
+    const artistData = await mbProvider.getArtist(mbid);
+    await this.storeArtist(mbid, artistData, true);
+    
+    // Fetch fresh album list
+    const albums = await mbProvider.getArtistAlbums(mbid);
+    logger.info(`Refreshing ${albums.length} albums for artist ${mbid}`);
+    
+    // Check which albums are NEW (not in database)
+    const existingAlbumMbids = await this.getArtistReleaseGroups(mbid);
+    const newAlbums = albums.filter(album => !existingAlbumMbids.includes(album.id));
+    
+    if (newAlbums.length > 0) {
+      logger.info(`Found ${newAlbums.length} NEW albums for artist ${mbid}`);
+      // Fetch only new albums synchronously
+      for (const album of newAlbums) {
+        try {
+          const fullAlbum = await mbProvider.getReleaseGroup(album.id);
+          await this.storeReleaseGroup(album.id, fullAlbum, mbid);
+          logger.info(`Stored new album ${album.id}`);
+        } catch (error) {
+          logger.error(`Failed to fetch new album ${album.id}:`, error);
+        }
+      }
+    } else {
+      logger.info(`No new albums found for artist ${mbid}`);
+    }
+    
+    logger.info(`Artist ${mbid} refresh complete`);
   }
   
   // Formatting removed - use lidarr.js formatArtist() instead

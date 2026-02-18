@@ -74,6 +74,10 @@ class Config {
       lidarr: {
         compatibilityMode: 'plugin', // or 'legacy'
         metadataProfile: 'default'
+      },
+      refresh: {
+        artistTTL: parseInt(process.env.ARTIST_TTL_DAYS) || 7, // Days before artist data expires
+        bulkRefreshInterval: parseInt(process.env.BULK_REFRESH_DAYS) || 180 // Days between bulk refreshes
       }
     };
 

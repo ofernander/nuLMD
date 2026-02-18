@@ -194,6 +194,49 @@ class Database {
     `, [artistMbid]);
     return result.rows.map(row => row.mbid);
   }
+
+  // Bulk refresh tracking methods
+  async getLastBulkRefresh() {
+    const result = await this.query(`
+      SELECT * FROM bulk_refresh_log
+      WHERE status = 'completed'
+      ORDER BY completed_at DESC
+      LIMIT 1
+    `);
+    return result.rows[0];
+  }
+
+  async startBulkRefresh() {
+    const result = await this.query(`
+      INSERT INTO bulk_refresh_log (started_at, status)
+      VALUES (NOW(), 'running')
+      RETURNING id
+    `);
+    return result.rows[0].id;
+  }
+
+  async completeBulkRefresh(id, artistsRefreshed) {
+    await this.query(`
+      UPDATE bulk_refresh_log
+      SET completed_at = NOW(),
+          status = 'completed',
+          artists_refreshed = $2
+      WHERE id = $1
+    `, [id, artistsRefreshed]);
+  }
+
+  async failBulkRefresh(id) {
+    await this.query(`
+      UPDATE bulk_refresh_log
+      SET status = 'failed'
+      WHERE id = $1
+    `, [id]);
+  }
+
+  async getAllArtistMbids() {
+    const result = await this.query('SELECT mbid FROM artists ORDER BY last_accessed_at DESC');
+    return result.rows.map(row => row.mbid);
+  }
 }
 
 module.exports = new Database();

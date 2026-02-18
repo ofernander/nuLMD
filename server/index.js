@@ -15,6 +15,7 @@ const { initializeProviders } = require('./lib/providerRegistry');
 const metadataJobQueue = require('./lib/metadataJobQueue');
 const { processJob } = require('./lib/jobProcessor');
 const imageDownloadQueue = require('./lib/imageDownloadQueue');
+const bulkRefresher = require('./lib/bulkRefresher');
 
 const app = express();
 const PORT = process.env.PORT || 5001;
@@ -62,9 +63,20 @@ app.get('/artist/:mbid', async (req, res) => {
     let artist = await database.getArtist(mbid);
     
     if (!artist) {
-      // Fetch from MusicBrainz
+      // Artist doesn't exist - fetch from MusicBrainz
       logger.info(`Artist ${mbid} not in DB, fetching from MusicBrainz`);
       await metaHandler.getArtist(mbid);
+    } else {
+      // Artist exists - check if TTL expired (7 days)
+      const now = new Date();
+      const ttlExpired = artist.ttl_expires_at && new Date(artist.ttl_expires_at) < now;
+      
+      if (ttlExpired) {
+        logger.info(`Artist ${mbid} TTL expired, refreshing from MusicBrainz`);
+        await metaHandler.refreshArtist(mbid);
+      } else {
+        logger.info(`Artist ${mbid} found in cache (TTL valid)`);
+      }
     }
     
     // Check if artist has albums in DB
@@ -614,6 +626,10 @@ async function start() {
     await imageDownloadQueue.startProcessor(500); // Check every 500ms, rate limiting handled per-provider
     logger.info('Image download queue processor started');
 
+    // Start bulk refresh scheduler (runs daily at 3am)
+    bulkRefresher.start();
+    logger.info('Bulk refresh scheduler started');
+
     // Start listening
     app.listen(PORT, () => {
       const serverUrl = process.env.SERVER_URL || `http://localhost:${PORT}`;
@@ -633,6 +649,7 @@ process.on('SIGTERM', () => {
   logger.info('SIGTERM received, shutting down gracefully');
   metadataJobQueue.stopProcessor();
   imageDownloadQueue.stopProcessor();
+  bulkRefresher.stop();
   process.exit(0);
 });
 
@@ -640,6 +657,7 @@ process.on('SIGINT', () => {
   logger.info('SIGINT received, shutting down gracefully');
   metadataJobQueue.stopProcessor();
   imageDownloadQueue.stopProcessor();
+  bulkRefresher.stop();
   process.exit(0);
 });
 

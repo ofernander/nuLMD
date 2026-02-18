@@ -34,7 +34,8 @@
     "node-cache": "^5.1.2",
     "joi": "^17.11.0",
     "js-yaml": "^4.1.0",
-    "pg": "^8.11.3"
+    "pg": "^8.11.3",
+    "node-cron": "^3.0.3"
   },
   "devDependencies": {
     "nodemon": "^3.0.2",
