@@ -12,6 +12,10 @@ Metadata proxy server for Lidarr
 - Caches artist & album art, pulling from multiple sources
 - Serves metadata & images to Lidarr by emulating the old Lidarr Metadata Server API
 
+### Lidarr Disclaimer
+
+nuLMD is not related to, supported, or endorsed by the official Lidarr dev team
+
 ## Requirements
 
 - Docker & Docker Compose
