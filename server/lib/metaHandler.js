@@ -412,7 +412,7 @@ class ArtistService {
           logger.info(`Fetched ${albumImages.length} images for album "${data.title}" from CoverArtArchive`);
         }
       } catch (error) {
-        logger.error(`Failed to fetch CoverArtArchive album images for "${data.title}":`, error.message);
+        logger.warn(`Failed to fetch CoverArtArchive album images for "${data.title}":`, error.message);
       }
     }
     

@@ -85,7 +85,12 @@ class ImageDownloader {
         logger.debug(`Error response status: ${error.response.status}`);
         logger.debug(`Error response headers: ${JSON.stringify(error.response.headers)}`);
         logger.debug(`Error response data: ${error.response.data}`);
-        logger.error(`Download failed with status ${error.response.status}: ${url}`);
+        // 404 is normal - not all albums have cover art
+        if (error.response.status === 404) {
+          logger.warn(`Download failed with status ${error.response.status}: ${url}`);
+        } else {
+          logger.error(`Download failed with status ${error.response.status}: ${url}`);
+        }
       } else if (error.code === 'ECONNABORTED') {
         logger.error(`Download timeout after ${this.timeout}ms: ${url}`);
       } else {
@@ -242,7 +247,12 @@ class ImageDownloader {
       WHERE id = $2
     `, [lastError.message, imageId]);
     
-    logger.error(`Failed to download image ${imageId} after ${attempt} attempts: ${lastError.message}`);
+    // 404 is normal - not all albums have cover art
+    if (lastError.response && lastError.response.status === 404) {
+      logger.warn(`Failed to download image ${imageId} after ${attempt} attempts: ${lastError.message}`);
+    } else {
+      logger.error(`Failed to download image ${imageId} after ${attempt} attempts: ${lastError.message}`);
+    }
   }
 
   /**

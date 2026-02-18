@@ -299,7 +299,7 @@ const ui = {
 
             // Add artist rows
             for (const artist of artists) {
-                const lastUpdated = artist.last_updated_at ? new Date(artist.last_updated_at).toLocaleDateString() : 'Never';
+                const lastUpdated = artist.last_updated_at ? new Date(artist.last_updated_at).toLocaleDateString() + ' ' + new Date(artist.last_updated_at).toLocaleTimeString() : 'Never';
                 
                 html += `
                     <tr class="level-0 artist-row" data-artist-id="${artist.mbid}" data-name="${artist.name.toLowerCase()}">
@@ -314,7 +314,7 @@ const ui = {
                         <td>${artist.release_count}</td>
                         <td>${artist.track_count}</td>
                         <td>${lastUpdated}</td>
-                        <td><button class="btn-refresh" onclick="ui.refreshArtistMetadata('${artist.mbid}')">Update</button></td>
+                        <td><button class="btn-refresh" onclick="ui.refreshArtistMetadata('${artist.mbid}')">Fetch</button></td>
                     </tr>
                 `;
             }
@@ -434,7 +434,7 @@ const ui = {
                 noAlbumsRow.setAttribute('data-parent-artist', artistMbid);
                 const typeLabel = typeFilter === 'all' ? '' : typeFilter + ' ';
                 const statusLabel = statusFilter === 'all' ? '' : statusFilter + ' ';
-                noAlbumsRow.innerHTML = `<td colspan="9" style="color: var(--text-secondary); font-style: italic;">No ${statusLabel}${typeLabel}albums</td>`;
+                noAlbumsRow.innerHTML = `<td colspan="9" style="color: var(--text-secondary); font-style: italic;">No ${statusLabel}${typeLabel}albums found in database, try fetching from MusicBrainz...</td>`;
                 row.insertAdjacentElement('afterend', noAlbumsRow);
                 return;
             }
@@ -459,7 +459,8 @@ const ui = {
                     <td>${releaseDate}</td>
                     <td>${album.release_count}</td>
                     <td>${album.track_count}</td>
-                    <td colspan="3"></td>
+                    <td colspan="2"></td>
+                    <td><button class="btn-refresh" onclick="event.stopPropagation(); ui.refreshAlbumMetadata('${album.mbid}', '${artistMbid}')">Fetch</button></td>
                 `;
                 
                 insertAfter.insertAdjacentElement('afterend', albumRow);
@@ -615,7 +616,7 @@ const ui = {
         `;
         
         for (const artist of this.metadataArtists) {
-            const lastUpdated = artist.last_updated_at ? new Date(artist.last_updated_at).toLocaleDateString() : 'Never';
+            const lastUpdated = artist.last_updated_at ? new Date(artist.last_updated_at).toLocaleDateString() + ' ' + new Date(artist.last_updated_at).toLocaleTimeString() : 'Never';
             
             html += `
                 <tr class="level-0 artist-row" data-artist-id="${artist.mbid}" data-name="${artist.name.toLowerCase()}">
@@ -630,7 +631,7 @@ const ui = {
                     <td>${artist.release_count}</td>
                     <td>${artist.track_count}</td>
                     <td>${lastUpdated}</td>
-                    <td><button class="btn-refresh" onclick="ui.refreshArtistMetadata('${artist.mbid}')">Update</button></td>
+                    <td><button class="btn-refresh" onclick="ui.refreshArtistMetadata('${artist.mbid}')">Fetch</button></td>
                 </tr>
             `;
         }
@@ -719,7 +720,7 @@ const ui = {
         tbody.innerHTML = '';
         
         for (const artist of sorted) {
-            const lastUpdated = artist.last_updated_at ? new Date(artist.last_updated_at).toLocaleDateString() : 'Never';
+            const lastUpdated = artist.last_updated_at ? new Date(artist.last_updated_at).toLocaleDateString() + ' ' + new Date(artist.last_updated_at).toLocaleTimeString() : 'Never';
             
             const row = document.createElement('tr');
             row.className = 'level-0 artist-row';
@@ -738,7 +739,7 @@ const ui = {
                 <td>${artist.release_count}</td>
                 <td>${artist.track_count}</td>
                 <td>${lastUpdated}</td>
-                <td><button class="btn-refresh" onclick="ui.refreshArtistMetadata('${artist.mbid}')">Update</button></td>
+                <td><button class="btn-refresh" onclick="ui.refreshArtistMetadata('${artist.mbid}')">Fetch</button></td>
             `;
             
             tbody.appendChild(row);
@@ -748,21 +749,46 @@ const ui = {
     async refreshArtistMetadata(mbid) {
         const btn = event.target;
         btn.disabled = true;
-        btn.textContent = 'Updating...';
+        btn.textContent = 'Fetching...';
+
+        // Reset button after 3 seconds regardless of outcome
+        setTimeout(() => {
+            btn.disabled = false;
+            btn.textContent = 'Fetch';
+        }, 3000);
 
         try {
-            const response = await fetch(`/api/refresh/artist/${mbid}`, { method: 'POST' });
-            if (!response.ok) throw new Error('Update failed');
+            // Use UI-specific endpoint that fetches EVERYTHING (all albums + all tracks)
+            const response = await fetch(`/api/ui/fetch-artist/${mbid}`, { method: 'POST' });
+            if (!response.ok) throw new Error('Fetch failed');
             
-            this.showSuccess('Artist metadata updated');
-            
-            // Reload metadata tree after short delay
-            setTimeout(() => this.loadMetadataTree(), 1000);
+            this.showSuccess('Artist fetch queued');
         } catch (error) {
-            console.error('Failed to update artist:', error);
-            this.showError('Failed to update artist metadata');
+            console.error('Failed to fetch artist:', error);
+            this.showError('Failed to fetch artist metadata');
+        }
+    },
+
+    async refreshAlbumMetadata(albumMbid, artistMbid) {
+        const btn = event.target;
+        btn.disabled = true;
+        btn.textContent = 'Fetching...';
+
+        // Reset button after 3 seconds regardless of outcome
+        setTimeout(() => {
             btn.disabled = false;
-            btn.textContent = 'Update';
+            btn.textContent = 'Fetch';
+        }, 3000);
+
+        try {
+            // Call /album/:mbid endpoint to fetch releases and tracks
+            const response = await fetch(`/album/${albumMbid}`);
+            if (!response.ok) throw new Error('Fetch failed');
+            
+            this.showSuccess('Album fetch queued');
+        } catch (error) {
+            console.error('Failed to fetch album:', error);
+            this.showError('Failed to fetch album tracks');
         }
     },
 
@@ -953,48 +979,18 @@ const ui = {
                 return;
             }
 
-            resultsDiv.innerHTML = `<p>Found ${searchResults.length} artist(s). Fetching complete metadata (albums + tracks)...</p>`;
-            
-            const fullResults = [];
-            for (let i = 0; i < searchResults.length; i++) {
-                const result = searchResults[i];
+            // Fire and forget - queue all fetches without waiting
+            let queued = 0;
+            for (const result of searchResults) {
                 try {
-                    resultsDiv.innerHTML = `<p>Fetching ${i + 1}/${searchResults.length}: ${result.ArtistName}...</p>`;
-                    
-                    // Use UI-specific endpoint that fetches EVERYTHING
-                    const response = await fetch(`/api/ui/fetch-artist/${result.Id}`, { method: 'POST' });
-                    if (!response.ok) throw new Error('Fetch failed');
-                    
-                    const fullData = await response.json();
-                    fullResults.push(fullData);
+                    fetch(`/api/ui/fetch-artist/${result.Id}`, { method: 'POST' });
+                    queued++;
                 } catch (error) {
-                    console.error(`Failed to fetch full data for ${result.Id}:`, error);
-                    fullResults.push({ ...result, _error: error.message });
+                    console.error(`Failed to queue fetch for ${result.Id}:`, error);
                 }
             }
 
-            // Display results
-            let html = `
-                <div class="alert alert-success">
-                    ✓ Successfully fetched and stored ${fullResults.length} artist(s) with all albums and tracks. View in Metadata Browser tab.
-                </div>
-                <h3>Fetched Artists</h3>
-                <ul>
-            `;
-            
-            fullResults.forEach(result => {
-                if (result._error) {
-                    html += `<li><strong>${result.ArtistName}</strong> - <span style="color: var(--danger);">Error: ${result._error}</span></li>`;
-                } else {
-                    const albumCount = result.Albums?.length || 0;
-                    const trackCount = result.Albums?.reduce((sum, album) => sum + (album.Tracks?.length || 0), 0) || 0;
-                    html += `<li><strong>${result.ArtistName}</strong> - ${albumCount} albums, ${trackCount} tracks</li>`;
-                }
-            });
-            
-            html += '</ul>';
-            
-            resultsDiv.innerHTML = html;
+            resultsDiv.innerHTML = `<div class="alert alert-success">✓ Fetch queued for ${queued} artist(s). Check Metadata Browser or logs for progress.</div>`;
         } catch (error) {
             console.error('Fetch failed:', error);
             resultsDiv.innerHTML = `<p class="alert alert-danger">Fetch failed: ${error.message}</p>`;

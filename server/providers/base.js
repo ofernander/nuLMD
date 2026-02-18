@@ -61,7 +61,9 @@ class BaseProvider {
   async handleError(error) {
     if (error.response) {
       // Server responded with error status
-      logger.error(`${this.name} API error:`, {
+      // 404 is normal for CoverArtArchive - not all albums have cover art
+      const logLevel = error.response.status === 404 ? 'warn' : 'error';
+      logger[logLevel](`${this.name} API error:`, {
         status: error.response.status,
         data: error.response.data
       });
@@ -132,10 +134,10 @@ class BaseProvider {
           logger.warn(`${this.name}: Request failed (attempt ${attempt}/${maxRetries}): ${error.message} - will retry in ${backoff / 1000}s`);
           await new Promise(resolve => setTimeout(resolve, backoff));
         } else if (!isRetryable) {
-          logger.error(`${this.name}: Non-retryable error for ${cacheKey}: ${error.message}`);
+          logger.warn(`${this.name}: Non-retryable error for ${cacheKey}: ${error.message}`);
           throw error;
         } else {
-          logger.error(`${this.name}: Request failed after all ${maxRetries} attempts for ${cacheKey}: ${error.message}`);
+          logger.warn(`${this.name}: Request failed after all ${maxRetries} attempts for ${cacheKey}: ${error.message}`);
           throw error;
         }
       }
