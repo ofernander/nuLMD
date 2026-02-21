@@ -327,14 +327,14 @@ const ui = {
 
             container.innerHTML = html;
 
+            // Sort alphabetically before storing
+            artists.sort((a, b) => (a.name || '').toLowerCase().localeCompare((b.name || '').toLowerCase()));
+
             // Store artists data - always reset sort to alphabetical on load
             this.metadataArtists = artists;
             this.metadataSort = { column: 'name', direction: 'asc' };
             this.currentAlbumTypeFilter = this.currentAlbumTypeFilter || 'Album';
             this.currentReleaseStatusFilter = this.currentReleaseStatusFilter || 'Official';
-
-            // Sort alphabetically by name on load
-            this.metadataArtists.sort((a, b) => (a.name || '').toLowerCase().localeCompare((b.name || '').toLowerCase()));
 
         } catch (error) {
             console.error('Failed to load metadata tree:', error);
@@ -784,8 +784,7 @@ const ui = {
         }, 3000);
 
         try {
-            // Call /album/:mbid endpoint to fetch releases and tracks
-            const response = await fetch(`/album/${albumMbid}`);
+            const response = await fetch(`/api/ui/fetch-album/${albumMbid}`, { method: 'POST' });
             if (!response.ok) throw new Error('Fetch failed');
             
             this.showSuccess('Album fetch queued');

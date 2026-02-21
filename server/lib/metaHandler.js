@@ -813,6 +813,141 @@ class ArtistService {
     logger.info(`Artist ${mbid} refresh complete`);
   }
   
+  /**
+   * Single entry point for artist metadata.
+   * Ensures artist + albums + first Official release per album are in DB.
+   * Called by both Lidarr endpoint and UI fetch button.
+   */
+  async ensureArtist(mbid) {
+    const mbProvider = registry.getProvider('musicbrainz');
+    if (!mbProvider) throw new Error('MusicBrainz provider not available');
+
+    // Fetch/refresh artist record
+    let artist = await database.getArtist(mbid);
+    if (!artist) {
+      logger.info(`Artist ${mbid} not in DB, fetching from MusicBrainz`);
+      await this.getArtist(mbid);
+    } else if (this.isStale(artist)) {
+      logger.info(`Artist ${mbid} TTL expired, refreshing`);
+      await this.refreshArtist(mbid);
+    }
+
+    // Fetch albums if none exist
+    const existingAlbums = await database.query(
+      'SELECT mbid FROM release_groups rg JOIN artist_release_groups arg ON arg.release_group_mbid = rg.mbid WHERE arg.artist_mbid = $1',
+      [mbid]
+    );
+
+    if (existingAlbums.rows.length === 0) {
+      logger.info(`Artist ${mbid} has no albums, fetching from MusicBrainz`);
+      const albums = await mbProvider.getArtistAlbums(mbid);
+      logger.info(`Found ${albums.length} albums for artist ${mbid}`);
+
+      for (let i = 0; i < albums.length; i++) {
+        const album = albums[i];
+        try {
+          const fullAlbum = await mbProvider.getReleaseGroup(album.id);
+          await this.storeReleaseGroup(album.id, fullAlbum, mbid);
+          logger.info(`Stored album ${album.id} (${i + 1}/${albums.length})`);
+
+          const releases = await mbProvider.getReleasesByReleaseGroup(album.id);
+          const target = releases.find(r => r.status === 'Official') || releases[0];
+          if (target) {
+            try {
+              const fullRelease = await mbProvider.getRelease(target.id);
+              await this.storeRelease(target.id, fullRelease);
+              logger.info(`Stored release ${target.id} for album ${album.id}`);
+            } catch (err) {
+              logger.error(`Failed to fetch release ${target.id}:`, err);
+            }
+          }
+        } catch (err) {
+          logger.error(`Failed to fetch album ${album.id}:`, err);
+        }
+      }
+    }
+
+    return lidarr.formatArtist(mbid);
+  }
+
+  /**
+   * Single entry point for album metadata.
+   * Ensures release group + Official releases are in DB.
+   * Called by both Lidarr endpoint and UI fetch button.
+   */
+  async ensureAlbum(mbid) {
+    const mbProvider = registry.getProvider('musicbrainz');
+    if (!mbProvider) throw new Error('MusicBrainz provider not available');
+
+    const album = await database.getReleaseGroup(mbid);
+
+    if (!album) {
+      logger.info(`Album ${mbid} not in DB, fetching from MusicBrainz`);
+      const releaseGroupData = await mbProvider.getReleaseGroup(mbid);
+
+      // Ensure artist exists
+      let artistId = null;
+      if (releaseGroupData['artist-credit']?.length > 0) {
+        artistId = releaseGroupData['artist-credit'][0].artist.id;
+        const artistExists = await database.getArtist(artistId);
+        if (!artistExists) {
+          logger.info(`Artist ${artistId} not in DB, fetching`);
+          await this.getArtist(artistId);
+        }
+      }
+
+      await this.storeReleaseGroup(mbid, releaseGroupData, artistId);
+
+      // Fetch all Official releases, queue others
+      const releases = await mbProvider.getReleasesByReleaseGroup(mbid);
+      const officialReleases = releases.filter(r => r.status === 'Official');
+      const otherReleases = releases.filter(r => r.status !== 'Official');
+
+      logger.info(`Album ${mbid}: ${officialReleases.length} Official, ${otherReleases.length} other releases`);
+
+      for (let i = 0; i < officialReleases.length; i++) {
+        const release = officialReleases[i];
+        try {
+          const fullRelease = await mbProvider.getRelease(release.id);
+          await this.storeRelease(release.id, fullRelease);
+          logger.info(`Stored Official release ${release.id} (${i + 1}/${officialReleases.length})`);
+        } catch (err) {
+          logger.error(`Failed to fetch release ${release.id}:`, err);
+        }
+      }
+
+      if (otherReleases.length > 0) {
+        const metadataJobQueue = require('./metadataJobQueue');
+        await metadataJobQueue.queueJob('fetch_album_full', 'release_group', mbid, 3);
+        logger.info(`Queued ${otherReleases.length} non-Official releases for background fetch`);
+      }
+
+    } else {
+      // Album exists - check releases
+      const existingReleases = await database.query(
+        'SELECT mbid FROM releases WHERE release_group_mbid = $1',
+        [mbid]
+      );
+
+      if (existingReleases.rows.length === 0) {
+        logger.info(`Album ${mbid} exists but has no releases, fetching`);
+        const releases = await mbProvider.getReleasesByReleaseGroup(mbid);
+        const target = releases.find(r => r.status === 'Official') || releases[0];
+        if (target) {
+          try {
+            const fullRelease = await mbProvider.getRelease(target.id);
+            await this.storeRelease(target.id, fullRelease);
+            logger.info(`Stored release ${target.id}`);
+          } catch (err) {
+            logger.error(`Failed to fetch release ${target.id}:`, err);
+          }
+        }
+      }
+    }
+
+    return lidarr.formatAlbum(mbid);
+  }
+
   // Formatting removed - use lidarr.js formatArtist() instead
 }
 

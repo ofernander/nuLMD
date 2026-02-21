@@ -433,58 +433,24 @@ router.get('/metadata/album-tracks/:mbid', async (req, res, next) => {
   }
 });
 
-// UI-specific fetch endpoint - queues full artist fetch asynchronously
+// UI fetch endpoints - respond immediately, run in background
 router.post('/ui/fetch-artist/:mbid', async (req, res, next) => {
   try {
     const { mbid } = req.params;
-    logger.info(`UI complete artist fetch requested for ${mbid}`);
-    
-    const mbProvider = registry.getProvider('musicbrainz');
-    if (!mbProvider) {
-      throw new Error('MusicBrainz provider not available');
-    }
-    
-    // Respond immediately
+    logger.info(`UI artist fetch requested for ${mbid}`);
     res.json({ success: true, message: `Fetch queued for ${mbid}` });
+    metaHandler.ensureArtist(mbid).catch(err => logger.error(`Background artist fetch failed for ${mbid}:`, err));
+  } catch (error) {
+    next(error);
+  }
+});
 
-    // Run full fetch in background - every album, every release, every track
-    (async () => {
-      try {
-        await metaHandler.getArtist(mbid);
-        
-        const albums = await mbProvider.getArtistAlbums(mbid);
-        logger.info(`Found ${albums.length} albums for artist ${mbid}, fetching everything...`);
-        
-        for (let i = 0; i < albums.length; i++) {
-          const album = albums[i];
-          try {
-            const fullAlbum = await mbProvider.getReleaseGroup(album.id);
-            await metaHandler.storeReleaseGroup(album.id, fullAlbum, mbid);
-            logger.info(`Stored album ${album.id} (${i + 1}/${albums.length})`);
-            
-            // Paginated browse to get ALL releases for this release group (not capped at 25)
-            const releases = await mbProvider.getReleasesByReleaseGroup(album.id);
-            for (let j = 0; j < releases.length; j++) {
-              const release = releases[j];
-              try {
-                const fullRelease = await mbProvider.getRelease(release.id);
-                await metaHandler.storeRelease(release.id, fullRelease);
-                logger.info(`Stored release ${release.id} (${j + 1}/${releases.length}) for album ${album.id}`);
-              } catch (error) {
-                logger.error(`Failed to fetch release ${release.id}:`, error);
-              }
-            }
-          } catch (error) {
-            logger.error(`Failed to fetch/store album ${album.id}:`, error);
-          }
-        }
-        
-        logger.info(`Completed full background fetch for artist ${mbid}: ${albums.length} albums`);
-      } catch (error) {
-        logger.error(`Background fetch failed for artist ${mbid}:`, error);
-      }
-    })();
-
+router.post('/ui/fetch-album/:mbid', async (req, res, next) => {
+  try {
+    const { mbid } = req.params;
+    logger.info(`UI album fetch requested for ${mbid}`);
+    res.json({ success: true, message: `Fetch queued for ${mbid}` });
+    metaHandler.ensureAlbum(mbid).catch(err => logger.error(`Background album fetch failed for ${mbid}:`, err));
   } catch (error) {
     next(error);
   }
