@@ -64,23 +64,13 @@ const api = {
         return this.get('/providers');
     },
 
-    async searchArtist(query, provider = null, limit = 10) {
+    async searchArtist(query, limit = 10) {
         const params = new URLSearchParams({ query, limit });
-        if (provider) params.append('provider', provider);
-        // Use fetch directly - search endpoints don't use /api prefix
-        const response = await fetch(`/search/artist?${params}`);
+        const response = await fetch(`/search?${params}`);
         if (!response.ok) throw new Error('Search failed');
-        return response.json();
-    },
-
-    async searchAlbum(query, artist = null, provider = null, limit = 10) {
-        const params = new URLSearchParams({ query, limit });
-        if (artist) params.append('artist', artist);
-        if (provider) params.append('provider', provider);
-        // Use fetch directly - search endpoints don't use /api prefix
-        const response = await fetch(`/search/album?${params}`);
-        if (!response.ok) throw new Error('Search failed');
-        return response.json();
+        const results = await response.json();
+        // Filter to artist results only, unwrap from { album, artist, score } wrapper
+        return results.filter(r => r.artist !== null).map(r => r.artist);
     },
 
     async getArtist(mbid) {
@@ -99,10 +89,6 @@ const api = {
 
     async getAlbumTracks(provider, id) {
         return this.get(`/album/${provider}/${id}/tracks`);
-    },
-
-    async getLogs(lines = 100) {
-        return this.get(`/logs/tail?lines=${lines}`);
     },
 
     async restartServer() {
@@ -132,10 +118,13 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (tabName === 'browser') {
                 ui.loadMetadataBrowser();
             } else if (tabName === 'sources') {
+                ui.refreshDashboard();
                 ui.loadMetadataSources();
             } else if (tabName === 'dashboard') {
                 ui.refreshDashboard();
                 ui.refreshDashboardStats();
+            } else if (tabName === 'logs') {
+                ui.loadLogsTab();
             }
         });
     });
@@ -143,6 +132,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Load initial dashboard
     await ui.refreshDashboard();
     await ui.refreshDashboardStats();
+    await ui.refreshJobsCard();
     
     // Start auto-refresh
     ui.startAutoRefresh();

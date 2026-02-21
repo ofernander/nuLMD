@@ -1,4 +1,5 @@
 const winston = require('winston');
+const DailyRotateFile = require('winston-daily-rotate-file');
 const path = require('path');
 
 const logLevel = process.env.LOG_LEVEL || 'info';
@@ -32,13 +33,23 @@ const logger = winston.createLogger({
         })
       )
     }),
-    // Write all logs to file
-    new winston.transports.File({
-      filename: path.join(__dirname, '../../logs/error.log'),
-      level: 'error'
+    // Write all logs to rotating files
+    new DailyRotateFile({
+      filename: path.join(__dirname, '../../logs/nuLMD-%DATE%.log'),
+      datePattern: 'YYYY-MM-DD',
+      maxSize: '20m',
+      maxFiles: 10,
+      zippedArchive: true,
+      auditFile: path.join(__dirname, '../../logs/.audit-combined.json')
     }),
-    new winston.transports.File({
-      filename: path.join(__dirname, '../../logs/combined.log')
+    new DailyRotateFile({
+      filename: path.join(__dirname, '../../logs/nuLMD-error-%DATE%.log'),
+      datePattern: 'YYYY-MM-DD',
+      level: 'error',
+      maxSize: '10m',
+      maxFiles: 5,
+      zippedArchive: true,
+      auditFile: path.join(__dirname, '../../logs/.audit-error.json')
     })
   ]
 });

@@ -433,65 +433,24 @@ router.get('/metadata/album-tracks/:mbid', async (req, res, next) => {
   }
 });
 
-// UI-specific fetch endpoint - fetches EVERYTHING for an artist
+// UI fetch endpoints - respond immediately, run in background
 router.post('/ui/fetch-artist/:mbid', async (req, res, next) => {
   try {
     const { mbid } = req.params;
-    logger.info(`UI complete artist fetch requested for ${mbid}`);
-    
-    const mbProvider = registry.getProvider('musicbrainz');
-    if (!mbProvider) {
-      throw new Error('MusicBrainz provider not available');
-    }
-    
-    // Fetch and store artist
-    await metaHandler.getArtist(mbid);
-    
-    // Get all albums for this artist
-    const albums = await mbProvider.getArtistAlbums(mbid);
-    logger.info(`Found ${albums.length} albums for artist ${mbid}, fetching all...`);
-    
-    // Fetch each album (release group)
-    for (let i = 0; i < albums.length; i++) {
-      const album = albums[i];
-      try {
-        const fullAlbum = await mbProvider.getReleaseGroup(album.id);
-        await metaHandler.storeReleaseGroup(album.id, fullAlbum, mbid);
-        logger.info(`Stored album ${album.id} (${i + 1}/${albums.length})`);
-        
-        // Get releases for this album
-        const releases = fullAlbum.releases || [];
-        
-        // Fetch first Official release (most likely to have tracks)
-        const officialRelease = releases.find(r => r.status === 'Official');
-        if (officialRelease) {
-          try {
-            const fullRelease = await mbProvider.getRelease(officialRelease.id);
-            await metaHandler.storeRelease(officialRelease.id, fullRelease);
-            logger.info(`Stored first Official release ${officialRelease.id} for album ${album.id}`);
-          } catch (error) {
-            logger.error(`Failed to fetch release ${officialRelease.id}:`, error);
-          }
-        } else if (releases.length > 0) {
-          // No Official release, fetch first available
-          try {
-            const fullRelease = await mbProvider.getRelease(releases[0].id);
-            await metaHandler.storeRelease(releases[0].id, fullRelease);
-            logger.info(`Stored first release ${releases[0].id} for album ${album.id}`);
-          } catch (error) {
-            logger.error(`Failed to fetch release ${releases[0].id}:`, error);
-          }
-        }
-      } catch (error) {
-        logger.error(`Failed to fetch/store album ${album.id}:`, error);
-      }
-    }
-    
-    logger.info(`Completed UI fetch for artist ${mbid}: ${albums.length} albums fetched`);
-    
-    // Return formatted artist with albums
-    const formatted = await lidarr.formatArtist(mbid);
-    res.json(formatted);
+    await metadataJobQueue.queueJob('artist_full', 'artist', mbid, 10);
+    logger.info(`UI artist fetch queued for ${mbid}`);
+    res.json({ success: true, message: `Fetch queued for ${mbid}` });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/ui/fetch-album/:mbid', async (req, res, next) => {
+  try {
+    const { mbid } = req.params;
+    await metadataJobQueue.queueJob('fetch_album_full', 'release_group', mbid, 10);
+    logger.info(`UI album fetch queued for ${mbid}`);
+    res.json({ success: true, message: `Fetch queued for ${mbid}` });
   } catch (error) {
     next(error);
   }
@@ -535,6 +494,127 @@ router.post('/refresh/all', async (req, res, next) => {
   }
 });
 
+// Recent jobs endpoint
+router.get('/jobs/recent', async (req, res, next) => {
+  try {
+    const result = await database.query(`
+      SELECT 
+        j.id, j.job_type, j.entity_type, j.entity_mbid, j.status,
+        j.created_at, j.started_at, j.completed_at, j.error_message,
+        COALESCE(a.name, rg.title) as entity_name,
+        CASE
+          WHEN j.entity_type != 'artist' THEN
+            COALESCE(
+              (SELECT ar.name FROM artists ar
+               JOIN artist_release_groups arg_n ON arg_n.artist_mbid = ar.mbid
+               WHERE arg_n.release_group_mbid = j.entity_mbid
+               LIMIT 1),
+              (SELECT rg_ac.artist_credit->0->>'name'
+               FROM release_groups rg_ac
+               WHERE rg_ac.mbid = j.entity_mbid
+               LIMIT 1)
+            )
+          ELSE NULL
+        END as artist_name,
+        CASE
+          WHEN j.entity_type = 'artist' THEN
+            (SELECT COUNT(*) FROM release_groups rg2
+             JOIN artist_release_groups arg ON arg.release_group_mbid = rg2.mbid
+             WHERE arg.artist_mbid = j.entity_mbid)
+          ELSE 0
+        END as album_count,
+        CASE
+          WHEN j.entity_type = 'artist' THEN
+            (SELECT COUNT(*) FROM releases r
+             JOIN release_groups rg3 ON rg3.mbid = r.release_group_mbid
+             JOIN artist_release_groups arg2 ON arg2.release_group_mbid = rg3.mbid
+             WHERE arg2.artist_mbid = j.entity_mbid)
+          ELSE
+            (SELECT COUNT(*) FROM releases r WHERE r.release_group_mbid = j.entity_mbid)
+        END as release_count,
+        CASE
+          WHEN j.entity_type = 'artist' THEN
+            (SELECT COUNT(DISTINCT t.recording_mbid) FROM tracks t
+             JOIN releases r2 ON r2.mbid = t.release_mbid
+             JOIN release_groups rg4 ON rg4.mbid = r2.release_group_mbid
+             JOIN artist_release_groups arg3 ON arg3.release_group_mbid = rg4.mbid
+             WHERE arg3.artist_mbid = j.entity_mbid)
+          ELSE
+            (SELECT COUNT(DISTINCT t.recording_mbid) FROM tracks t
+             JOIN releases r3 ON r3.mbid = t.release_mbid
+             WHERE r3.release_group_mbid = j.entity_mbid)
+        END as track_count
+      FROM metadata_jobs j
+      LEFT JOIN artists a ON a.mbid = j.entity_mbid
+      LEFT JOIN release_groups rg ON rg.mbid = j.entity_mbid
+      ORDER BY j.created_at DESC
+      LIMIT 50
+    `);
+    res.json(result.rows);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Log files list endpoint
+router.get('/logs/files', async (req, res, next) => {
+  try {
+    const fs = require('fs').promises;
+    const path = require('path');
+    const logsDir = path.join(__dirname, '../../logs');
+
+    const files = await fs.readdir(logsDir);
+    const logFiles = files.filter(f => f.endsWith('.log') && !f.startsWith('.'));
+
+    const fileStats = await Promise.all(logFiles.map(async (filename) => {
+      const stat = await fs.stat(path.join(logsDir, filename));
+      return {
+        name: filename,
+        size_bytes: stat.size,
+        modified_at: stat.mtime
+      };
+    }));
+
+    // Sort newest modified first
+    fileStats.sort((a, b) => new Date(b.modified_at) - new Date(a.modified_at));
+
+    res.json(fileStats);
+  } catch (error) {
+    if (error.code === 'ENOENT') return res.json([]);
+    next(error);
+  }
+});
+
+// Log file content endpoint
+router.get('/logs/file', async (req, res, next) => {
+  try {
+    const fs = require('fs').promises;
+    const path = require('path');
+    const { name, tail = 500 } = req.query;
+
+    if (!name) return res.status(400).json({ error: 'name parameter required' });
+
+    // Prevent path traversal
+    const safeName = path.basename(name);
+    const filePath = path.join(__dirname, '../../logs', safeName);
+
+    const content = await fs.readFile(filePath, 'utf8');
+    const lines = content.split('\n').filter(Boolean);
+    const tailLines = lines.slice(-parseInt(tail));
+
+    // Parse JSON log lines
+    const parsed = tailLines.map(line => {
+      try { return JSON.parse(line); }
+      catch { return { timestamp: null, level: 'info', message: line }; }
+    });
+
+    res.json(parsed);
+  } catch (error) {
+    if (error.code === 'ENOENT') return res.status(404).json({ error: 'Log file not found' });
+    next(error);
+  }
+});
+
 // Log tail endpoint
 router.get('/logs/tail', (req, res) => {
   const { lines = 100 } = req.query;
@@ -549,8 +629,10 @@ router.get('/logs/tail', (req, res) => {
     const msg = log.message || '';
     const level = log.level || 'info';
     
-    // Only show INFO, WARN, and ERROR levels (skip DEBUG)
-    if (level === 'debug' || level === 'http' || level === 'verbose' || level === 'silly') return false;
+    // Filter out noisy low-level logs unless debug mode active
+    const { logger: activeLogger } = require('./logger');
+    if (activeLogger.level !== 'debug' && (level === 'debug' || level === 'http' || level === 'verbose' || level === 'silly')) return false;
+    if (activeLogger.level === 'debug' && (level === 'http' || level === 'verbose' || level === 'silly')) return false;
     
     // Filter out HTTP requests (not metadata work)
     if (msg.startsWith('GET ') || msg.startsWith('POST ') || msg.startsWith('PUT ') || msg.startsWith('DELETE ')) return false;

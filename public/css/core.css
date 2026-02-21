@@ -386,7 +386,7 @@ footer a:hover {
     font-family: 'Courier New', Monaco, monospace;
     font-size: 0.875rem;
     line-height: 1.6;
-    height: 500px;
+    height: 800px;
     overflow-y: auto;
     color: #e2e8f0;
 }
@@ -624,6 +624,102 @@ footer a:hover {
 /* Hidden rows */
 .metadata-table tr.hidden {
     display: none;
+}
+
+/* Job Queue Card */
+.job-queue-container {
+    max-height: 520px;
+    min-height: 520px;
+    overflow-y: auto;
+    padding-right: 4px;
+}
+
+.job-queue-empty {
+    color: var(--text-secondary);
+    text-align: center;
+    padding: 2rem;
+    font-style: italic;
+}
+
+.job-row {
+    margin-bottom: 0.75rem;
+}
+
+.job-row-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.25rem;
+    font-size: 0.8rem;
+}
+
+.job-label { color: var(--text); font-weight: 500; }
+.job-artist-name { color: var(--text-secondary); font-weight: normal; }
+.job-type-badge { font-size: 0.7rem; color: var(--text-secondary); margin-left: 0.4rem; font-weight: normal; }
+.job-counts { display: flex; gap: 1rem; font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.2rem; }
+.job-counts span::before { content: '↳ '; }
+
+.job-status { font-size: 0.75rem; font-weight: 600; text-transform: uppercase; }
+.job-status-pending    { color: var(--text-secondary); }
+.job-status-processing { color: #ffa500; }
+.job-status-completed  { color: var(--primary); }
+.job-status-failed     { color: var(--danger); }
+
+.job-bar-track {
+    height: 6px;
+    background: var(--bg-tertiary);
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+.job-bar {
+    height: 100%;
+    border-radius: 3px;
+    transition: width 0.4s ease;
+}
+
+.job-bar-pending    { background: var(--text-secondary); width: 0%; }
+.job-bar-done       { background: var(--primary); }
+.job-bar-failed     { background: var(--danger); }
+.job-bar-processing { background: #ffa500; }
+
+@keyframes job-pulse {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: 0.4; }
+}
+.job-bar-animated { animation: job-pulse 1.2s ease-in-out infinite; }
+
+/* Log File List */
+.log-file-entry {
+    padding: 0.75rem;
+    border-radius: 0.375rem;
+    cursor: pointer;
+    margin-bottom: 0.375rem;
+    border: 1px solid transparent;
+    transition: all 0.15s;
+}
+
+.log-file-entry:hover {
+    background: var(--hover-bg);
+    border-color: var(--border);
+}
+
+.log-file-entry.active {
+    background: rgba(0, 166, 91, 0.1);
+    border-color: var(--primary);
+}
+
+.log-file-name {
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: var(--text);
+    word-break: break-all;
+}
+
+.log-file-meta {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    margin-top: 0.2rem;
 }
 
 @media (max-width: 768px) {

@@ -1,9 +1,17 @@
+const JOB_LABELS = {
+    fetch_artist:        'Artist',
+    fetch_artist_albums: 'Albums',
+    fetch_release:       'Release',
+    fetch_album_full:    'Full Album',
+    artist_full:         'Artist (Full)',
+    artist_releases:     'Artist Releases',
+    release_tracks:      'Track Data',
+    download_image:      'Image'
+};
+
 // UI management functions
 const ui = {
     refreshInterval: null,
-    logAutoScroll: true,
-    lastLogLength: 0,
-    minVisibleLogs: 50,  // Minimum number of log lines to keep visible
 
     async refreshDashboard() {
         try {
@@ -12,18 +20,6 @@ const ui = {
                 api.getConfig()
             ]);
             
-            // Load debug toggle state
-            try {
-                const logLevelResponse = await fetch('/api/log-level');
-                const logLevelData = await logLevelResponse.json();
-                const debugToggle = document.getElementById('debugToggle');
-                if (debugToggle) {
-                    debugToggle.checked = logLevelData.level === 'debug';
-                }
-            } catch (error) {
-                console.error('Failed to load log level:', error);
-            }
-
             const container = document.getElementById('providerCards');
             
             if (!providers || providers.length === 0) {
@@ -97,39 +93,7 @@ const ui = {
         }
     },
 
-    async refreshLogs() {
-        try {
-            const logs = await api.getLogs();
-            const viewer = document.getElementById('logViewer');
-            
-            // Always update if logs changed
-            if (logs.length !== this.lastLogLength) {
-                if (logs.length === 0) {
-                    // No logs after filtering - keep showing last state, don't clear
-                    // Only clear on very first load or explicit clear button
-                    if (this.lastLogLength === 0) {
-                        viewer.innerHTML = '';
-                    }
-                } else {
-                    // Only show the last N logs to prevent UI slowdown
-                    const logsToShow = logs.slice(-this.minVisibleLogs);
-                    viewer.innerHTML = logsToShow.map(log => this.formatLogLine(log)).join('');
-                    this.lastLogLength = logs.length;
-                    
-                    // Auto-scroll to bottom if enabled
-                    if (this.logAutoScroll) {
-                        viewer.scrollTop = viewer.scrollHeight;
-                    }
-                }
-            }
-        } catch (error) {
-            console.error('Failed to refresh logs:', error);
-            const viewer = document.getElementById('logViewer');
-            if (!viewer.querySelector('.log-loading')) {
-                viewer.innerHTML = '<div class="log-empty">Failed to load logs</div>';
-            }
-        }
-    },
+
 
     formatLogLine(log) {
         const timestamp = new Date(log.timestamp).toLocaleTimeString();
@@ -148,23 +112,6 @@ const ui = {
         const div = document.createElement('div');
         div.textContent = text;
         return div.innerHTML;
-    },
-
-    toggleLogAutoScroll() {
-        this.logAutoScroll = !this.logAutoScroll;
-        const btn = document.getElementById('autoScrollBtn');
-        btn.textContent = `Auto-scroll: ${this.logAutoScroll ? 'ON' : 'OFF'}`;
-        
-        if (this.logAutoScroll) {
-            const viewer = document.getElementById('logViewer');
-            viewer.scrollTop = viewer.scrollHeight;
-        }
-    },
-
-    clearLogs() {
-        const viewer = document.getElementById('logViewer');
-        viewer.innerHTML = '';
-        this.lastLogLength = 0;
     },
 
     async loadMetadataSources() {
@@ -327,11 +274,14 @@ const ui = {
 
             container.innerHTML = html;
 
-            // Store artists data
+            // Sort alphabetically before storing
+            artists.sort((a, b) => (a.name || '').toLowerCase().localeCompare((b.name || '').toLowerCase()));
+
+            // Store artists data - always reset sort to alphabetical on load
             this.metadataArtists = artists;
             this.metadataSort = { column: 'name', direction: 'asc' };
-            this.currentAlbumTypeFilter = 'Album'; // Default to Studio Albums Only
-            this.currentReleaseStatusFilter = 'Official'; // Default to Official Only
+            this.currentAlbumTypeFilter = this.currentAlbumTypeFilter || 'Album';
+            this.currentReleaseStatusFilter = this.currentReleaseStatusFilter || 'Official';
 
         } catch (error) {
             console.error('Failed to load metadata tree:', error);
@@ -781,8 +731,7 @@ const ui = {
         }, 3000);
 
         try {
-            // Call /album/:mbid endpoint to fetch releases and tracks
-            const response = await fetch(`/album/${albumMbid}`);
+            const response = await fetch(`/api/ui/fetch-album/${albumMbid}`, { method: 'POST' });
             if (!response.ok) throw new Error('Fetch failed');
             
             this.showSuccess('Album fetch queued');
@@ -964,53 +913,221 @@ const ui = {
         const resultsDiv = document.getElementById('testResults');
 
         if (!query) {
-            resultsDiv.innerHTML = '<p class="alert alert-danger">Please enter an artist name</p>';
+            resultsDiv.innerHTML = '<p class="alert alert-danger">Please enter a search term</p>';
             return;
         }
 
-        resultsDiv.innerHTML = '<p>Searching MusicBrainz for artists...</p>';
+        resultsDiv.innerHTML = '<p>Searching MusicBrainz...</p>';
 
         try {
-            // Search for artists first
-            const searchResults = await api.searchArtist(query, null, limit);
-            
+            const searchResults = await api.searchArtist(query, limit);
+
             if (searchResults.length === 0) {
-                resultsDiv.innerHTML = '<p class="alert alert-info">No artists found matching "' + query + '"</p>';
+                resultsDiv.innerHTML = '<p class="alert alert-info">No results found for "' + this.escapeHtml(query) + '"</p>';
                 return;
             }
 
-            // Fire and forget - queue all fetches without waiting
-            let queued = 0;
+            let html = '<table class="metadata-table" style="margin-top: 1rem;">';
+            html += '<thead><tr><th>Artist</th><th>Type</th><th>Country</th><th>Overview</th><th>Action</th></tr></thead>';
+            html += '<tbody>';
+
             for (const result of searchResults) {
-                try {
-                    fetch(`/api/ui/fetch-artist/${result.Id}`, { method: 'POST' });
-                    queued++;
-                } catch (error) {
-                    console.error(`Failed to queue fetch for ${result.Id}:`, error);
-                }
+                const overview = result.Overview || '<em style="color: var(--text-secondary)">No overview available</em>';
+                const type = result.Type || '-';
+                const country = result.Country || '-';
+                html += `
+                    <tr>
+                        <td><strong>${this.escapeHtml(result.ArtistName)}</strong>${result.Disambiguation ? '<br><small style="color:var(--text-secondary)">' + this.escapeHtml(result.Disambiguation) + '</small>' : ''}</td>
+                        <td>${this.escapeHtml(type)}</td>
+                        <td>${this.escapeHtml(country)}</td>
+                        <td style="max-width: 400px; font-size: 0.85rem;">${this.escapeHtml(typeof overview === 'string' ? overview.substring(0, 300) + (overview.length > 300 ? '...' : '') : '')}</td>
+                        <td><button class="btn btn-primary" onclick="ui.fetchArtistFromSearch('${result.Id}', this)">Fetch</button></td>
+                    </tr>
+                `;
             }
 
-            resultsDiv.innerHTML = `<div class="alert alert-success">✓ Fetch queued for ${queued} artist(s). Check Metadata Browser or logs for progress.</div>`;
+            html += '</tbody></table>';
+            resultsDiv.innerHTML = html;
         } catch (error) {
-            console.error('Fetch failed:', error);
-            resultsDiv.innerHTML = `<p class="alert alert-danger">Fetch failed: ${error.message}</p>`;
+            console.error('Search failed:', error);
+            resultsDiv.innerHTML = `<p class="alert alert-danger">Search failed: ${error.message}</p>`;
+        }
+    },
+
+    async fetchArtistFromSearch(mbid, btn) {
+        btn.disabled = true;
+        btn.textContent = 'Queued';
+        try {
+            const response = await fetch(`/api/ui/fetch-artist/${mbid}`, { method: 'POST' });
+            if (!response.ok) throw new Error('Fetch failed');
+            this.showSuccess('Artist fetch queued — check logs for progress');
+        } catch (error) {
+            console.error('Failed to queue fetch:', error);
+            btn.disabled = false;
+            btn.textContent = 'Fetch';
+            this.showError('Failed to queue artist fetch');
+        }
+    },
+
+    async loadLogsTab() {
+        await this.loadLogFileList();
+        // Auto-select most recent file (first in list, sorted by modified desc)
+        const firstEntry = document.querySelector('.log-file-entry');
+        if (firstEntry) firstEntry.click();
+    },
+
+    async loadLogFileList() {
+        const container = document.getElementById('logFileList');
+        try {
+            const response = await fetch('/api/logs/files');
+            const files = await response.json();
+
+            if (files.length === 0) {
+                container.innerHTML = '<p style="color: var(--text-secondary); font-size: 0.875rem;">No log files yet</p>';
+                return;
+            }
+
+            let html = '';
+            for (const file of files) {
+                const sizeKb = Math.round(file.size_bytes / 1024);
+                const modified = new Date(file.modified_at).toLocaleDateString();
+                const isActive = this.currentLogFile === file.name;
+                html += `<div class="log-file-entry ${isActive ? 'active' : ''}" onclick="ui.selectLogFile('${file.name}')">
+                    <div class="log-file-name">${this.escapeHtml(file.name)}</div>
+                    <div class="log-file-meta">${sizeKb} KB &middot; ${modified}</div>
+                </div>`;
+            }
+
+            container.innerHTML = html;
+        } catch (error) {
+            container.innerHTML = '<p style="color: var(--text-secondary); font-size: 0.875rem;">Failed to load log files</p>';
+        }
+    },
+
+    async selectLogFile(filename) {
+        this.currentLogFile = filename;
+        this.lastLogLength = 0;
+
+        // Update active state in file list
+        await this.loadLogFileList();
+
+        const viewer = document.getElementById('logViewer');
+        const title = document.getElementById('logViewerTitle');
+
+        if (!filename) {
+            title.textContent = 'Select a log file';
+            viewer.innerHTML = '<div class="log-empty">Select a log file from the left panel</div>';
+            return;
+        }
+
+        title.textContent = filename;
+        viewer.innerHTML = '<div class="log-loading">Loading...</div>';
+
+        try {
+            const response = await fetch(`/api/logs/file?name=${encodeURIComponent(filename)}&tail=500`);
+            if (!response.ok) throw new Error('Failed to load file');
+            const logs = await response.json();
+
+            if (logs.length === 0) {
+                viewer.innerHTML = '<div class="log-empty">No log entries</div>';
+                return;
+            }
+
+            viewer.innerHTML = logs.map(log => this.formatLogLine(log)).join('');
+            viewer.scrollTop = viewer.scrollHeight;
+        } catch (error) {
+            viewer.innerHTML = `<div class="log-empty">Failed to load ${filename}</div>`;
+        }
+    },
+
+    async refreshJobsCard() {
+        try {
+            const response = await fetch('/api/jobs/recent');
+            const jobs = await response.json();
+            const container = document.getElementById('jobQueueCard');
+            if (!container) return;
+
+            if (jobs.length === 0) {
+                this.jobsHasActive = false;
+                container.innerHTML = '<div class="job-queue-empty">No jobs yet</div>';
+                return;
+            }
+
+            this.jobsHasActive = jobs.some(j => j.status === 'processing' || j.status === 'pending');
+
+            container.innerHTML = jobs.map(job => {
+                const label = JOB_LABELS[job.job_type] || job.job_type;
+                const mbidShort = job.entity_mbid.substring(0, 8);
+                const displayName = job.entity_name || (mbidShort + '...');
+                const isProcessing = job.status === 'processing';
+                const isFailed    = job.status === 'failed';
+                const isDone      = job.status === 'completed';
+                const barClass    = isFailed      ? 'job-bar-failed'
+                                  : isDone        ? 'job-bar-done'
+                                  : isProcessing  ? 'job-bar-processing'
+                                  : 'job-bar-pending';
+                const fillPct     = isDone || isFailed ? '100%' : isProcessing ? '60%' : '0%';
+
+                const albumCount   = parseInt(job.album_count) || 0;
+                const releaseCount = parseInt(job.release_count) || 0;
+                const trackCount   = parseInt(job.track_count) || 0;
+                const hasCounts    = albumCount > 0 || releaseCount > 0 || trackCount > 0;
+                const countsHtml   = hasCounts ? `
+                    <div class="job-counts">
+                        ${albumCount   > 0 ? `<span>${albumCount} albums</span>` : ''}
+                        ${releaseCount > 0 ? `<span>${releaseCount} releases</span>` : ''}
+                        ${trackCount   > 0 ? `<span>${trackCount} tracks</span>` : ''}
+                    </div>` : '';
+
+                const artistPrefix = job.artist_name
+                    ? `<span class="job-artist-name">${this.escapeHtml(job.artist_name)}</span> — `
+                    : '';
+
+                return `
+                    <div class="job-row">
+                        <div class="job-row-header">
+                            <span class="job-label">${artistPrefix}${this.escapeHtml(displayName)} <span class="job-type-badge">${label}</span></span>
+                            <span class="job-status job-status-${job.status}">${job.status}</span>
+                        </div>
+                        <div class="job-bar-track">
+                            <div class="job-bar ${barClass} ${isProcessing ? 'job-bar-animated' : ''}" style="width: ${fillPct}"></div>
+                        </div>
+                        ${countsHtml}
+                    </div>`;
+            }).join('');
+        } catch (error) {
+            console.error('Failed to refresh job queue:', error);
         }
     },
 
     startAutoRefresh() {
-        // Refresh appropriate tab content
+        // Stats always poll at 1s
         this.refreshInterval = setInterval(() => {
             if (document.getElementById('dashboard-tab').classList.contains('active')) {
-                this.refreshLogs();
                 this.refreshDashboardStats();
             }
-        }, 500);
+        }, 1000);
+
+        // Jobs poll at 1s when active, 5s when idle
+        this.jobsHasActive = false;
+        const pollJobs = async () => {
+            if (document.getElementById('dashboard-tab').classList.contains('active')) {
+                await this.refreshJobsCard();
+            }
+            const interval = this.jobsHasActive ? 1000 : 5000;
+            this.jobsRefreshTimeout = setTimeout(pollJobs, interval);
+        };
+        pollJobs();
     },
 
     stopAutoRefresh() {
         if (this.refreshInterval) {
             clearInterval(this.refreshInterval);
             this.refreshInterval = null;
+        }
+        if (this.jobsRefreshTimeout) {
+            clearTimeout(this.jobsRefreshTimeout);
+            this.jobsRefreshTimeout = null;
         }
     },
 
@@ -1039,26 +1156,8 @@ const ui = {
         }, 5000);
     },
 
-    async toggleDebugLogging(enabled) {
-        try {
-            const level = enabled ? 'debug' : 'info';
-            const response = await fetch('/api/log-level', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ level })
-            });
-            
-            if (!response.ok) throw new Error('Failed to set log level');
-            
-            this.showSuccess(`Debug logging ${enabled ? 'enabled' : 'disabled'}`);
-        } catch (error) {
-            console.error('Failed to toggle debug logging:', error);
-            this.showError('Failed to change log level');
-            // Revert checkbox
-            document.getElementById('debugToggle').checked = !enabled;
-        }
-    }
 };
+
 
 // Export for global use
 window.ui = ui;
