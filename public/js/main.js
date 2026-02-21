@@ -132,6 +132,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Load initial dashboard
     await ui.refreshDashboard();
     await ui.refreshDashboardStats();
+    await ui.refreshJobsCard();
     
     // Start auto-refresh
     ui.startAutoRefresh();

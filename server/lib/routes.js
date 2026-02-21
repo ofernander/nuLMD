@@ -437,9 +437,9 @@ router.get('/metadata/album-tracks/:mbid', async (req, res, next) => {
 router.post('/ui/fetch-artist/:mbid', async (req, res, next) => {
   try {
     const { mbid } = req.params;
-    logger.info(`UI artist fetch requested for ${mbid}`);
+    await metadataJobQueue.queueJob('artist_full', 'artist', mbid, 10);
+    logger.info(`UI artist fetch queued for ${mbid}`);
     res.json({ success: true, message: `Fetch queued for ${mbid}` });
-    metaHandler.ensureArtist(mbid).catch(err => logger.error(`Background artist fetch failed for ${mbid}:`, err));
   } catch (error) {
     next(error);
   }
@@ -448,9 +448,9 @@ router.post('/ui/fetch-artist/:mbid', async (req, res, next) => {
 router.post('/ui/fetch-album/:mbid', async (req, res, next) => {
   try {
     const { mbid } = req.params;
-    logger.info(`UI album fetch requested for ${mbid}`);
+    await metadataJobQueue.queueJob('fetch_album_full', 'release_group', mbid, 10);
+    logger.info(`UI album fetch queued for ${mbid}`);
     res.json({ success: true, message: `Fetch queued for ${mbid}` });
-    metaHandler.ensureAlbum(mbid).catch(err => logger.error(`Background album fetch failed for ${mbid}:`, err));
   } catch (error) {
     next(error);
   }
@@ -489,6 +489,68 @@ router.post('/refresh/all', async (req, res, next) => {
     });
     
     res.json({ success: true, message: 'Bulk refresh started in background' });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Recent jobs endpoint
+router.get('/jobs/recent', async (req, res, next) => {
+  try {
+    const result = await database.query(`
+      SELECT 
+        j.id, j.job_type, j.entity_type, j.entity_mbid, j.status,
+        j.created_at, j.started_at, j.completed_at, j.error_message,
+        COALESCE(a.name, rg.title) as entity_name,
+        CASE
+          WHEN j.entity_type != 'artist' THEN
+            COALESCE(
+              (SELECT ar.name FROM artists ar
+               JOIN artist_release_groups arg_n ON arg_n.artist_mbid = ar.mbid
+               WHERE arg_n.release_group_mbid = j.entity_mbid
+               LIMIT 1),
+              (SELECT rg_ac.artist_credit->0->>'name'
+               FROM release_groups rg_ac
+               WHERE rg_ac.mbid = j.entity_mbid
+               LIMIT 1)
+            )
+          ELSE NULL
+        END as artist_name,
+        CASE
+          WHEN j.entity_type = 'artist' THEN
+            (SELECT COUNT(*) FROM release_groups rg2
+             JOIN artist_release_groups arg ON arg.release_group_mbid = rg2.mbid
+             WHERE arg.artist_mbid = j.entity_mbid)
+          ELSE 0
+        END as album_count,
+        CASE
+          WHEN j.entity_type = 'artist' THEN
+            (SELECT COUNT(*) FROM releases r
+             JOIN release_groups rg3 ON rg3.mbid = r.release_group_mbid
+             JOIN artist_release_groups arg2 ON arg2.release_group_mbid = rg3.mbid
+             WHERE arg2.artist_mbid = j.entity_mbid)
+          ELSE
+            (SELECT COUNT(*) FROM releases r WHERE r.release_group_mbid = j.entity_mbid)
+        END as release_count,
+        CASE
+          WHEN j.entity_type = 'artist' THEN
+            (SELECT COUNT(DISTINCT t.recording_mbid) FROM tracks t
+             JOIN releases r2 ON r2.mbid = t.release_mbid
+             JOIN release_groups rg4 ON rg4.mbid = r2.release_group_mbid
+             JOIN artist_release_groups arg3 ON arg3.release_group_mbid = rg4.mbid
+             WHERE arg3.artist_mbid = j.entity_mbid)
+          ELSE
+            (SELECT COUNT(DISTINCT t.recording_mbid) FROM tracks t
+             JOIN releases r3 ON r3.mbid = t.release_mbid
+             WHERE r3.release_group_mbid = j.entity_mbid)
+        END as track_count
+      FROM metadata_jobs j
+      LEFT JOIN artists a ON a.mbid = j.entity_mbid
+      LEFT JOIN release_groups rg ON rg.mbid = j.entity_mbid
+      ORDER BY j.created_at DESC
+      LIMIT 50
+    `);
+    res.json(result.rows);
   } catch (error) {
     next(error);
   }

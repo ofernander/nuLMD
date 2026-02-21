@@ -1,3 +1,14 @@
+const JOB_LABELS = {
+    fetch_artist:        'Artist',
+    fetch_artist_albums: 'Albums',
+    fetch_release:       'Release',
+    fetch_album_full:    'Full Album',
+    artist_full:         'Artist (Full)',
+    artist_releases:     'Artist Releases',
+    release_tracks:      'Track Data',
+    download_image:      'Image'
+};
+
 // UI management functions
 const ui = {
     refreshInterval: null,
@@ -1029,18 +1040,94 @@ const ui = {
         }
     },
 
+    async refreshJobsCard() {
+        try {
+            const response = await fetch('/api/jobs/recent');
+            const jobs = await response.json();
+            const container = document.getElementById('jobQueueCard');
+            if (!container) return;
+
+            if (jobs.length === 0) {
+                this.jobsHasActive = false;
+                container.innerHTML = '<div class="job-queue-empty">No jobs yet</div>';
+                return;
+            }
+
+            this.jobsHasActive = jobs.some(j => j.status === 'processing' || j.status === 'pending');
+
+            container.innerHTML = jobs.map(job => {
+                const label = JOB_LABELS[job.job_type] || job.job_type;
+                const mbidShort = job.entity_mbid.substring(0, 8);
+                const displayName = job.entity_name || (mbidShort + '...');
+                const isProcessing = job.status === 'processing';
+                const isFailed    = job.status === 'failed';
+                const isDone      = job.status === 'completed';
+                const barClass    = isFailed      ? 'job-bar-failed'
+                                  : isDone        ? 'job-bar-done'
+                                  : isProcessing  ? 'job-bar-processing'
+                                  : 'job-bar-pending';
+                const fillPct     = isDone || isFailed ? '100%' : isProcessing ? '60%' : '0%';
+
+                const albumCount   = parseInt(job.album_count) || 0;
+                const releaseCount = parseInt(job.release_count) || 0;
+                const trackCount   = parseInt(job.track_count) || 0;
+                const hasCounts    = albumCount > 0 || releaseCount > 0 || trackCount > 0;
+                const countsHtml   = hasCounts ? `
+                    <div class="job-counts">
+                        ${albumCount   > 0 ? `<span>${albumCount} albums</span>` : ''}
+                        ${releaseCount > 0 ? `<span>${releaseCount} releases</span>` : ''}
+                        ${trackCount   > 0 ? `<span>${trackCount} tracks</span>` : ''}
+                    </div>` : '';
+
+                const artistPrefix = job.artist_name
+                    ? `<span class="job-artist-name">${this.escapeHtml(job.artist_name)}</span> — `
+                    : '';
+
+                return `
+                    <div class="job-row">
+                        <div class="job-row-header">
+                            <span class="job-label">${artistPrefix}${this.escapeHtml(displayName)} <span class="job-type-badge">${label}</span></span>
+                            <span class="job-status job-status-${job.status}">${job.status}</span>
+                        </div>
+                        <div class="job-bar-track">
+                            <div class="job-bar ${barClass} ${isProcessing ? 'job-bar-animated' : ''}" style="width: ${fillPct}"></div>
+                        </div>
+                        ${countsHtml}
+                    </div>`;
+            }).join('');
+        } catch (error) {
+            console.error('Failed to refresh job queue:', error);
+        }
+    },
+
     startAutoRefresh() {
+        // Stats always poll at 1s
         this.refreshInterval = setInterval(() => {
             if (document.getElementById('dashboard-tab').classList.contains('active')) {
                 this.refreshDashboardStats();
             }
-        }, 500);
+        }, 1000);
+
+        // Jobs poll at 1s when active, 5s when idle
+        this.jobsHasActive = false;
+        const pollJobs = async () => {
+            if (document.getElementById('dashboard-tab').classList.contains('active')) {
+                await this.refreshJobsCard();
+            }
+            const interval = this.jobsHasActive ? 1000 : 5000;
+            this.jobsRefreshTimeout = setTimeout(pollJobs, interval);
+        };
+        pollJobs();
     },
 
     stopAutoRefresh() {
         if (this.refreshInterval) {
             clearInterval(this.refreshInterval);
             this.refreshInterval = null;
+        }
+        if (this.jobsRefreshTimeout) {
+            clearTimeout(this.jobsRefreshTimeout);
+            this.jobsRefreshTimeout = null;
         }
     },
 

@@ -39,6 +39,7 @@ app.use((req, res, next) => {
     '/api/cache/stats',
     '/api/stats',
     '/api/config',
+    '/api/jobs/recent',
     '/api/providers'
   ];
   
@@ -59,6 +60,7 @@ app.get('/artist/:mbid', async (req, res) => {
   try {
     const { mbid } = req.params;
     logger.info(`Lidarr artist request: ${mbid}`);
+    metadataJobQueue.queueJob('artist_full', 'artist', mbid, 5).catch(err => logger.error(`Failed to queue artist job ${mbid}:`, err));
     const formatted = await metaHandler.ensureArtist(mbid);
     res.json(formatted);
   } catch (error) {
@@ -71,6 +73,7 @@ app.get('/album/:mbid', async (req, res) => {
   try {
     const { mbid } = req.params;
     logger.info(`Lidarr album request: ${mbid}`);
+    metadataJobQueue.queueJob('fetch_album_full', 'release_group', mbid, 5).catch(err => logger.error(`Failed to queue album job ${mbid}:`, err));
     const formatted = await metaHandler.ensureAlbum(mbid);
     res.json(formatted);
   } catch (error) {
@@ -183,7 +186,7 @@ async function start() {
     logger.info('Metadata providers initialized');
 
     // Start background job processor
-    await metadataJobQueue.startProcessor(processJob, 5000); // Check for jobs every 5 seconds
+    await metadataJobQueue.startProcessor(processJob, 1000); // Check for jobs every 1 second
     logger.info('Metadata job processor started');
 
     // Start image download queue processor (runs independently with per-provider rate limiting)

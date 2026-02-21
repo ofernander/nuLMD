@@ -27,7 +27,7 @@
             <button class="tab active" data-tab="dashboard">Dashboard</button>
             <button class="tab" data-tab="browser">Metadata Browser</button>
             <button class="tab" data-tab="sources">Metadata Sources</button>
-            <button class="tab" data-tab="testing">Fetch Metadata</button>
+            <button class="tab" data-tab="testing">Search Metadata</button>
             <button class="tab" data-tab="logs">Logs</button>
         </nav>
 
@@ -74,6 +74,12 @@
                     </div>
                 </div>
 
+                <div class="card">
+                    <h2>Job Queue</h2>
+                    <div id="jobQueueCard" class="job-queue-container">
+                        <div class="job-queue-empty">No jobs yet</div>
+                    </div>
+                </div>
             </section>
 
 
@@ -114,10 +120,10 @@
 
 
 
-            <!-- Fetch Metadata Tab -->
+            <!-- Search Metadata Tab -->
             <section id="testing-tab" class="tab-content">
                 <div class="card">
-                    <h2>Fetch Metadata from MusicBrainz</h2>
+                    <h2>Search Metadata from MusicBrainz</h2>
                     <div class="alert alert-info">
                         Search for an artist by name. Clicking Fetch will pull ALL albums, ALL releases, and ALL tracks for that artist from MusicBrainz and store them locally.
                     </div>
@@ -161,7 +167,7 @@
         </footer>
     </div>
 
-    <script src="/js/main.js?v=9"></script>
-    <script src="/js/ui.js?v=9"></script>
+    <script src="/js/main.js?v=14"></script>
+    <script src="/js/ui.js?v=14"></script>
 </body>
 </html>
