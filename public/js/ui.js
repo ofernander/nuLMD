@@ -327,11 +327,14 @@ const ui = {
 
             container.innerHTML = html;
 
-            // Store artists data
+            // Store artists data - always reset sort to alphabetical on load
             this.metadataArtists = artists;
             this.metadataSort = { column: 'name', direction: 'asc' };
-            this.currentAlbumTypeFilter = 'Album'; // Default to Studio Albums Only
-            this.currentReleaseStatusFilter = 'Official'; // Default to Official Only
+            this.currentAlbumTypeFilter = this.currentAlbumTypeFilter || 'Album';
+            this.currentReleaseStatusFilter = this.currentReleaseStatusFilter || 'Official';
+
+            // Sort alphabetically by name on load
+            this.metadataArtists.sort((a, b) => (a.name || '').toLowerCase().localeCompare((b.name || '').toLowerCase()));
 
         } catch (error) {
             console.error('Failed to load metadata tree:', error);

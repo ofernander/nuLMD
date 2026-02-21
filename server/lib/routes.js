@@ -433,7 +433,7 @@ router.get('/metadata/album-tracks/:mbid', async (req, res, next) => {
   }
 });
 
-// UI-specific fetch endpoint - fetches EVERYTHING for an artist
+// UI-specific fetch endpoint - queues full artist fetch asynchronously
 router.post('/ui/fetch-artist/:mbid', async (req, res, next) => {
   try {
     const { mbid } = req.params;
@@ -444,54 +444,47 @@ router.post('/ui/fetch-artist/:mbid', async (req, res, next) => {
       throw new Error('MusicBrainz provider not available');
     }
     
-    // Fetch and store artist
-    await metaHandler.getArtist(mbid);
-    
-    // Get all albums for this artist
-    const albums = await mbProvider.getArtistAlbums(mbid);
-    logger.info(`Found ${albums.length} albums for artist ${mbid}, fetching all...`);
-    
-    // Fetch each album (release group)
-    for (let i = 0; i < albums.length; i++) {
-      const album = albums[i];
+    // Respond immediately
+    res.json({ success: true, message: `Fetch queued for ${mbid}` });
+
+    // Run full fetch in background - every album, every release, every track
+    (async () => {
       try {
-        const fullAlbum = await mbProvider.getReleaseGroup(album.id);
-        await metaHandler.storeReleaseGroup(album.id, fullAlbum, mbid);
-        logger.info(`Stored album ${album.id} (${i + 1}/${albums.length})`);
+        await metaHandler.getArtist(mbid);
         
-        // Get releases for this album
-        const releases = fullAlbum.releases || [];
+        const albums = await mbProvider.getArtistAlbums(mbid);
+        logger.info(`Found ${albums.length} albums for artist ${mbid}, fetching everything...`);
         
-        // Fetch first Official release (most likely to have tracks)
-        const officialRelease = releases.find(r => r.status === 'Official');
-        if (officialRelease) {
+        for (let i = 0; i < albums.length; i++) {
+          const album = albums[i];
           try {
-            const fullRelease = await mbProvider.getRelease(officialRelease.id);
-            await metaHandler.storeRelease(officialRelease.id, fullRelease);
-            logger.info(`Stored first Official release ${officialRelease.id} for album ${album.id}`);
+            const fullAlbum = await mbProvider.getReleaseGroup(album.id);
+            await metaHandler.storeReleaseGroup(album.id, fullAlbum, mbid);
+            logger.info(`Stored album ${album.id} (${i + 1}/${albums.length})`);
+            
+            // Paginated browse to get ALL releases for this release group (not capped at 25)
+            const releases = await mbProvider.getReleasesByReleaseGroup(album.id);
+            for (let j = 0; j < releases.length; j++) {
+              const release = releases[j];
+              try {
+                const fullRelease = await mbProvider.getRelease(release.id);
+                await metaHandler.storeRelease(release.id, fullRelease);
+                logger.info(`Stored release ${release.id} (${j + 1}/${releases.length}) for album ${album.id}`);
+              } catch (error) {
+                logger.error(`Failed to fetch release ${release.id}:`, error);
+              }
+            }
           } catch (error) {
-            logger.error(`Failed to fetch release ${officialRelease.id}:`, error);
-          }
-        } else if (releases.length > 0) {
-          // No Official release, fetch first available
-          try {
-            const fullRelease = await mbProvider.getRelease(releases[0].id);
-            await metaHandler.storeRelease(releases[0].id, fullRelease);
-            logger.info(`Stored first release ${releases[0].id} for album ${album.id}`);
-          } catch (error) {
-            logger.error(`Failed to fetch release ${releases[0].id}:`, error);
+            logger.error(`Failed to fetch/store album ${album.id}:`, error);
           }
         }
+        
+        logger.info(`Completed full background fetch for artist ${mbid}: ${albums.length} albums`);
       } catch (error) {
-        logger.error(`Failed to fetch/store album ${album.id}:`, error);
+        logger.error(`Background fetch failed for artist ${mbid}:`, error);
       }
-    }
-    
-    logger.info(`Completed UI fetch for artist ${mbid}: ${albums.length} albums fetched`);
-    
-    // Return formatted artist with albums
-    const formatted = await lidarr.formatArtist(mbid);
-    res.json(formatted);
+    })();
+
   } catch (error) {
     next(error);
   }
@@ -549,8 +542,10 @@ router.get('/logs/tail', (req, res) => {
     const msg = log.message || '';
     const level = log.level || 'info';
     
-    // Only show INFO, WARN, and ERROR levels (skip DEBUG)
-    if (level === 'debug' || level === 'http' || level === 'verbose' || level === 'silly') return false;
+    // Filter out noisy low-level logs unless debug mode active
+    const { logger: activeLogger } = require('./logger');
+    if (activeLogger.level !== 'debug' && (level === 'debug' || level === 'http' || level === 'verbose' || level === 'silly')) return false;
+    if (activeLogger.level === 'debug' && (level === 'http' || level === 'verbose' || level === 'silly')) return false;
     
     // Filter out HTTP requests (not metadata work)
     if (msg.startsWith('GET ') || msg.startsWith('POST ') || msg.startsWith('PUT ') || msg.startsWith('DELETE ')) return false;

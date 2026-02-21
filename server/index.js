@@ -98,45 +98,31 @@ app.get('/artist/:mbid', async (req, res) => {
       const albums = await mbProvider.getArtistAlbums(mbid);
       logger.info(`Found ${albums.length} albums for artist ${mbid}`);
       
-      // Fetch FIRST FEW albums synchronously WITH their first Official release (so we have tracks)
-      const albumsToFetchNow = Math.min(3, albums.length);
-      for (let i = 0; i < albumsToFetchNow; i++) {
+      // Fetch ALL albums synchronously with their first Official release
+      for (let i = 0; i < albums.length; i++) {
         const album = albums[i];
         try {
           const fullAlbum = await mbProvider.getReleaseGroup(album.id);
           await metaHandler.storeReleaseGroup(album.id, fullAlbum, mbid);
-          logger.info(`Stored album ${album.id} (${i + 1}/${albumsToFetchNow})`);
+          logger.info(`Stored album ${album.id} (${i + 1}/${albums.length})`);
           
-          // Also fetch first Official release to get tracks
-          const releases = fullAlbum.releases || [];
+          // Paginated browse to get ALL releases for this release group (not capped at 25)
+          const releases = await mbProvider.getReleasesByReleaseGroup(album.id);
           const officialRelease = releases.find(r => r.status === 'Official');
-          if (officialRelease) {
+          const targetRelease = officialRelease || releases[0];
+
+          if (targetRelease) {
             try {
-              const fullRelease = await mbProvider.getRelease(officialRelease.id);
-              await metaHandler.storeRelease(officialRelease.id, fullRelease);
-              logger.info(`Stored first Official release ${officialRelease.id} with tracks for album ${album.id}`);
+              const fullRelease = await mbProvider.getRelease(targetRelease.id);
+              await metaHandler.storeRelease(targetRelease.id, fullRelease);
+              logger.info(`Stored release ${targetRelease.id} for album ${album.id}`);
             } catch (error) {
-              logger.error(`Failed to fetch release ${officialRelease.id}:`, error);
-            }
-          } else if (releases.length > 0) {
-            // No Official release, fetch first available
-            try {
-              const fullRelease = await mbProvider.getRelease(releases[0].id);
-              await metaHandler.storeRelease(releases[0].id, fullRelease);
-              logger.info(`Stored first release ${releases[0].id} with tracks for album ${album.id}`);
-            } catch (error) {
-              logger.error(`Failed to fetch release ${releases[0].id}:`, error);
+              logger.error(`Failed to fetch release ${targetRelease.id}:`, error);
             }
           }
         } catch (error) {
           logger.error(`Failed to fetch/store album ${album.id}:`, error);
         }
-      }
-      
-      // Queue complete artist fetch as background job (will fetch ALL albums + releases)
-      if (albums.length > albumsToFetchNow) {
-        await metadataJobQueue.queueJob('fetch_artist_albums', 'artist', mbid, 5);
-        logger.info(`Queued complete artist fetch for ${mbid} (${albums.length - albumsToFetchNow} remaining albums)`);
       }
     }
     

@@ -81,22 +81,39 @@ class MusicBrainzProvider extends BaseProvider {
     });
   }
 
-  async getArtistAlbums(artistMbid, limit = 100) {
+  async getArtistAlbums(artistMbid) {
     const cacheKey = `mb:artist:${artistMbid}:albums`;
     
     return this.cachedRequest(cacheKey, async () => {
-      logger.info(`MusicBrainz: Fetching albums for artist ${artistMbid}`);
+      logger.info(`MusicBrainz: Fetching all albums for artist ${artistMbid} (paginated)`);
       
-      const response = await this.client.get('/release-group', {
-        params: {
-          artist: artistMbid,
-          limit: limit,
-          fmt: 'json',
-          type: 'album|ep|single|broadcast|other'
-        }
-      });
+      const allAlbums = [];
+      let offset = 0;
+      const limit = 100;
+      let total = null;
 
-      return this.normalizeAlbumSearchResults(response.data);
+      do {
+        const response = await this.client.get('/release-group', {
+          params: {
+            artist: artistMbid,
+            limit,
+            offset,
+            fmt: 'json',
+            type: 'album|ep|single|broadcast|other'
+          }
+        });
+
+        const data = response.data;
+        if (total === null) total = data['release-group-count'] || 0;
+
+        const page = this.normalizeAlbumSearchResults(data);
+        allAlbums.push(...page);
+        offset += limit;
+
+        logger.info(`MusicBrainz: Fetched ${allAlbums.length}/${total} release groups for artist ${artistMbid}`);
+      } while (offset < total);
+
+      return allAlbums;
     });
   }
 
@@ -151,6 +168,43 @@ class MusicBrainzProvider extends BaseProvider {
 
     // Return the releases array
     return response.data.releases || [];
+  }
+
+  async getReleasesByReleaseGroup(releaseGroupMbid) {
+    logger.info(`MusicBrainz: Fetching all releases for release group ${releaseGroupMbid} (paginated)`);
+
+    const allReleases = [];
+    let offset = 0;
+    const limit = 100;
+    let total = null;
+
+    do {
+      const response = await this.client.get('/release', {
+        params: {
+          'release-group': releaseGroupMbid,
+          limit,
+          offset,
+          fmt: 'json'
+        }
+      });
+
+      const data = response.data;
+      if (total === null) total = data['release-count'] || 0;
+
+      const releases = data.releases || [];
+      allReleases.push(...releases.map(r => ({
+        id: r.id,
+        title: r.title,
+        date: r.date,
+        country: r.country,
+        status: r.status
+      })));
+      offset += limit;
+
+      logger.info(`MusicBrainz: Fetched ${allReleases.length}/${total} releases for release group ${releaseGroupMbid}`);
+    } while (offset < total);
+
+    return allReleases;
   }
 
   async searchAlbum(query, artist = null, limit = 10) {
