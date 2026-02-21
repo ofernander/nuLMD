@@ -851,14 +851,14 @@ class ArtistService {
           logger.info(`Stored album ${album.id} (${i + 1}/${albums.length})`);
 
           const releases = await mbProvider.getReleasesByReleaseGroup(album.id);
-          const target = releases.find(r => r.status === 'Official') || releases[0];
-          if (target) {
+          logger.info(`Fetching ${releases.length} releases for album ${album.id}`);
+          for (const release of releases) {
             try {
-              const fullRelease = await mbProvider.getRelease(target.id);
-              await this.storeRelease(target.id, fullRelease);
-              logger.info(`Stored release ${target.id} for album ${album.id}`);
+              const fullRelease = await mbProvider.getRelease(release.id);
+              await this.storeRelease(release.id, fullRelease);
+              logger.info(`Stored release ${release.id} for album ${album.id}`);
             } catch (err) {
-              logger.error(`Failed to fetch release ${target.id}:`, err);
+              logger.error(`Failed to fetch release ${release.id}:`, err);
             }
           }
         } catch (err) {

@@ -64,23 +64,13 @@ const api = {
         return this.get('/providers');
     },
 
-    async searchArtist(query, provider = null, limit = 10) {
+    async searchArtist(query, limit = 10) {
         const params = new URLSearchParams({ query, limit });
-        if (provider) params.append('provider', provider);
-        // Use fetch directly - search endpoints don't use /api prefix
-        const response = await fetch(`/search/artist?${params}`);
+        const response = await fetch(`/search?${params}`);
         if (!response.ok) throw new Error('Search failed');
-        return response.json();
-    },
-
-    async searchAlbum(query, artist = null, provider = null, limit = 10) {
-        const params = new URLSearchParams({ query, limit });
-        if (artist) params.append('artist', artist);
-        if (provider) params.append('provider', provider);
-        // Use fetch directly - search endpoints don't use /api prefix
-        const response = await fetch(`/search/album?${params}`);
-        if (!response.ok) throw new Error('Search failed');
-        return response.json();
+        const results = await response.json();
+        // Filter to artist results only, unwrap from { album, artist, score } wrapper
+        return results.filter(r => r.artist !== null).map(r => r.artist);
     },
 
     async getArtist(mbid) {

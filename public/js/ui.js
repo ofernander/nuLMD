@@ -966,36 +966,59 @@ const ui = {
         const resultsDiv = document.getElementById('testResults');
 
         if (!query) {
-            resultsDiv.innerHTML = '<p class="alert alert-danger">Please enter an artist name</p>';
+            resultsDiv.innerHTML = '<p class="alert alert-danger">Please enter a search term</p>';
             return;
         }
 
-        resultsDiv.innerHTML = '<p>Searching MusicBrainz for artists...</p>';
+        resultsDiv.innerHTML = '<p>Searching MusicBrainz...</p>';
 
         try {
-            // Search for artists first
-            const searchResults = await api.searchArtist(query, null, limit);
-            
+            const searchResults = await api.searchArtist(query, limit);
+
             if (searchResults.length === 0) {
-                resultsDiv.innerHTML = '<p class="alert alert-info">No artists found matching "' + query + '"</p>';
+                resultsDiv.innerHTML = '<p class="alert alert-info">No results found for "' + this.escapeHtml(query) + '"</p>';
                 return;
             }
 
-            // Fire and forget - queue all fetches without waiting
-            let queued = 0;
+            let html = '<table class="metadata-table" style="margin-top: 1rem;">';
+            html += '<thead><tr><th>Artist</th><th>Type</th><th>Country</th><th>Overview</th><th>Action</th></tr></thead>';
+            html += '<tbody>';
+
             for (const result of searchResults) {
-                try {
-                    fetch(`/api/ui/fetch-artist/${result.Id}`, { method: 'POST' });
-                    queued++;
-                } catch (error) {
-                    console.error(`Failed to queue fetch for ${result.Id}:`, error);
-                }
+                const overview = result.Overview || '<em style="color: var(--text-secondary)">No overview available</em>';
+                const type = result.Type || '-';
+                const country = result.Country || '-';
+                html += `
+                    <tr>
+                        <td><strong>${this.escapeHtml(result.ArtistName)}</strong>${result.Disambiguation ? '<br><small style="color:var(--text-secondary)">' + this.escapeHtml(result.Disambiguation) + '</small>' : ''}</td>
+                        <td>${this.escapeHtml(type)}</td>
+                        <td>${this.escapeHtml(country)}</td>
+                        <td style="max-width: 400px; font-size: 0.85rem;">${this.escapeHtml(typeof overview === 'string' ? overview.substring(0, 300) + (overview.length > 300 ? '...' : '') : '')}</td>
+                        <td><button class="btn btn-primary" onclick="ui.fetchArtistFromSearch('${result.Id}', this)">Fetch</button></td>
+                    </tr>
+                `;
             }
 
-            resultsDiv.innerHTML = `<div class="alert alert-success">✓ Fetch queued for ${queued} artist(s). Check Metadata Browser or logs for progress.</div>`;
+            html += '</tbody></table>';
+            resultsDiv.innerHTML = html;
         } catch (error) {
-            console.error('Fetch failed:', error);
-            resultsDiv.innerHTML = `<p class="alert alert-danger">Fetch failed: ${error.message}</p>`;
+            console.error('Search failed:', error);
+            resultsDiv.innerHTML = `<p class="alert alert-danger">Search failed: ${error.message}</p>`;
+        }
+    },
+
+    async fetchArtistFromSearch(mbid, btn) {
+        btn.disabled = true;
+        btn.textContent = 'Queued';
+        try {
+            const response = await fetch(`/api/ui/fetch-artist/${mbid}`, { method: 'POST' });
+            if (!response.ok) throw new Error('Fetch failed');
+            this.showSuccess('Artist fetch queued — check logs for progress');
+        } catch (error) {
+            console.error('Failed to queue fetch:', error);
+            btn.disabled = false;
+            btn.textContent = 'Fetch';
+            this.showError('Failed to queue artist fetch');
         }
     },
 
