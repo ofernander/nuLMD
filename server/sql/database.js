@@ -142,7 +142,7 @@ class Database {
         (SELECT COUNT(*) FROM artists) as artist_count,
         (SELECT COUNT(*) FROM release_groups) as album_count,
         (SELECT COUNT(*) FROM releases) as release_count,
-        (SELECT COUNT(*) FROM tracks) as track_count,
+        (SELECT COUNT(DISTINCT recording_mbid) FROM tracks) as track_count,
         (SELECT COUNT(*) FROM images WHERE cached = true) as cached_images,
         (SELECT pg_database_size(current_database())) as db_size_bytes
     `);

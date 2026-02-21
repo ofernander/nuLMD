@@ -3,7 +3,8 @@ const { logger } = require('./logger');
 
 class MetadataJobQueue {
   constructor() {
-    this.processing = false;
+    this.activeWorkers = 0;
+    this.maxWorkers = 3;
     this.processInterval = null;
   }
 
@@ -114,7 +115,9 @@ class MetadataJobQueue {
       pending: 0,
       processing: 0,
       completed: 0,
-      failed: 0
+      failed: 0,
+      active_workers: this.activeWorkers,
+      max_workers: this.maxWorkers
     };
 
     result.rows.forEach(row => {
@@ -190,36 +193,19 @@ class MetadataJobQueue {
     logger.info('Starting metadata job queue processor');
 
     this.processInterval = setInterval(async () => {
-      if (this.processing) {
-        return; // Already processing a job
-      }
+      if (this.activeWorkers >= this.maxWorkers) return;
 
       try {
-        this.processing = true;
         const job = await this.getNextJob();
 
         if (job) {
-          if (job.attempts > 1) {
-            logger.info(`Retrying job ${job.id}: ${job.job_type} for ${job.entity_mbid} (attempt ${job.attempts}/${job.max_attempts})`);
-          } else {
-            logger.info(`Processing job ${job.id}: ${job.job_type} for ${job.entity_mbid}`);
-          }
-
-          try {
-            await processJobFn(job);
-            if (job.attempts > 1) {
-              logger.info(`Job ${job.id} succeeded on attempt ${job.attempts} - recovered!`);
-            }
-            await this.completeJob(job.id);
-          } catch (error) {
-            logger.error(`Job ${job.id} processing error: ${error.message}`);
-            await this.failJob(job.id, error.message);
-          }
+          this.activeWorkers++;
+          this._runJob(job, processJobFn).finally(() => {
+            this.activeWorkers--;
+          });
         }
       } catch (error) {
         logger.error('Metadata job processor error:', error);
-      } finally {
-        this.processing = false;
       }
     }, intervalMs);
 
@@ -227,6 +213,24 @@ class MetadataJobQueue {
     setInterval(() => {
       this.cleanupOldJobs().catch(err => logger.error('Cleanup error:', err));
     }, 3600000); // Every hour
+  }
+
+  async _runJob(job, processJobFn) {
+    if (job.attempts > 1) {
+      logger.info(`Retrying job ${job.id}: ${job.job_type} for ${job.entity_mbid} (attempt ${job.attempts}/${job.max_attempts})`);
+    } else {
+      logger.info(`Processing job ${job.id}: ${job.job_type} for ${job.entity_mbid} [worker ${this.activeWorkers}/${this.maxWorkers}]`);
+    }
+    try {
+      await processJobFn(job);
+      if (job.attempts > 1) {
+        logger.info(`Job ${job.id} succeeded on attempt ${job.attempts} - recovered!`);
+      }
+      await this.completeJob(job.id);
+    } catch (error) {
+      logger.error(`Job ${job.id} processing error: ${error.message}`);
+      await this.failJob(job.id, error.message);
+    }
   }
 
   /**

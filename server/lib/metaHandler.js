@@ -352,25 +352,7 @@ class ArtistService {
     
     // Date is already normalized in normalizeReleaseGroup
     const releaseDate = data.firstReleaseDate || data['first-release-date'] || null;
-    
-    // Ensure artist has Wikipedia overview if needed
-    if (artistMbid) {
-      const artist = await database.getArtist(artistMbid);
-      if (artist && (!artist.overview || artist.overview === '')) {
-        // Artist exists but no overview - fetch it
-        logger.info(`Artist ${artistMbid} missing overview, fetching from Wikipedia...`);
-        const mbProvider = registry.getProvider('musicbrainz');
-        if (mbProvider) {
-          try {
-            const fullArtistData = await mbProvider.getArtist(artistMbid);
-            await this.storeArtist(artistMbid, fullArtistData, true);
-          } catch (error) {
-            logger.error(`Failed to fetch full artist data for ${artistMbid}:`, error.message);
-          }
-        }
-      }
-    }
-    
+
     // Get artist name for album overview and image search
     let artistName = null;
     if (artistMbid) {
@@ -381,6 +363,17 @@ class ArtistService {
     // Fetch Wikipedia overview for the album
     let albumOverview = data.overview || '';
     if (!albumOverview) {
+      // Check DB first — another worker may have already fetched it
+      const existingRg = await database.query(
+        'SELECT overview FROM release_groups WHERE mbid = $1',
+        [mbid]
+      );
+      if (existingRg.rows[0]?.overview) {
+        albumOverview = existingRg.rows[0].overview;
+        logger.info(`[TIMING] Wikipedia album overview "${data.title}": skipped (DB hit)`);
+      }
+    }
+    if (!albumOverview) {
       const WikipediaProvider = require('../providers/wikipedia');
       const wikidataId = WikipediaProvider.extractWikidataId(data.relations || []);
       
@@ -388,10 +381,11 @@ class ArtistService {
         const wikiProvider = registry.getProvider('wikipedia');
         if (wikiProvider) {
           try {
+            const tw = Date.now();
             const overview = await wikiProvider.getAlbumOverview(wikidataId, data.title, artistName);
+            logger.info(`[TIMING] Wikipedia album overview "${data.title}": ${Date.now()-tw}ms`);
             if (overview) {
               albumOverview = overview;
-              logger.info(`Fetched Wikipedia overview for album "${data.title}" (${overview.length} chars)`);
             }
           } catch (error) {
             logger.error(`Failed to fetch Wikipedia overview for album "${data.title}":`, error.message);
@@ -407,10 +401,9 @@ class ArtistService {
     const caaProvider = registry.getProvider('coverartarchive');
     if (caaProvider) {
       try {
+        const tc = Date.now();
         albumImages = await caaProvider.getAlbumImages(mbid);
-        if (albumImages.length > 0) {
-          logger.info(`Fetched ${albumImages.length} images for album "${data.title}" from CoverArtArchive`);
-        }
+        logger.info(`[TIMING] CAA images "${data.title}": ${Date.now()-tc}ms (${albumImages.length} found)`);
       } catch (error) {
         logger.warn(`Failed to fetch CoverArtArchive album images for "${data.title}":`, error.message);
       }
@@ -421,10 +414,9 @@ class ArtistService {
       const tadbProvider = registry.getProvider('theaudiodb');
       if (tadbProvider) {
         try {
+          const tt = Date.now();
           albumImages = await tadbProvider.getAlbumImages(data.title, artistName, mbid);
-          if (albumImages.length > 0) {
-            logger.info(`Fetched ${albumImages.length} images for album "${data.title}" from TheAudioDB`);
-          }
+          logger.info(`[TIMING] TADB images "${data.title}": ${Date.now()-tt}ms (${albumImages.length} found)`);
         } catch (error) {
           logger.error(`Failed to fetch TheAudioDB album images for "${data.title}":`, error.message);
         }
@@ -436,10 +428,11 @@ class ArtistService {
       const fanartProvider = registry.getProvider('fanart');
       if (fanartProvider && fanartProvider.getAlbumImages) {
         try {
+          const tf = Date.now();
           const fanartImages = await fanartProvider.getAlbumImages(mbid);
+          logger.info(`[TIMING] Fanart images "${data.title}": ${Date.now()-tf}ms (${fanartImages.length} found)`);
           if (fanartImages.length > 0) {
             albumImages = fanartImages;
-            logger.info(`Fetched ${fanartImages.length} images for album "${data.title}" from Fanart.tv`);
           }
         } catch (error) {
           logger.error(`Failed to fetch Fanart.tv album images for "${data.title}":`, error.message);
@@ -854,6 +847,19 @@ class ArtistService {
       await this.refreshArtist(mbid);
     }
 
+    // Ensure artist overview populated once before album loop
+    // Previously this check ran inside storeReleaseGroup on every album = N MB requests
+    artist = await database.getArtist(mbid);
+    if (artist && (!artist.overview || artist.overview === '')) {
+      logger.info(`Artist ${mbid} missing overview, fetching once before album loop`);
+      try {
+        const fullArtistData = await mbProvider.getArtist(mbid);
+        await this.storeArtist(mbid, fullArtistData, true);
+      } catch (error) {
+        logger.error(`Failed to fetch artist overview for ${mbid}:`, error.message);
+      }
+    }
+
     // Fetch albums if none exist
     const existingAlbums = await database.query(
       'SELECT mbid FROM release_groups rg JOIN artist_release_groups arg ON arg.release_group_mbid = rg.mbid WHERE arg.artist_mbid = $1',
@@ -868,17 +874,29 @@ class ArtistService {
       for (let i = 0; i < albums.length; i++) {
         const album = albums[i];
         try {
+          let t0 = Date.now();
           const fullAlbum = await mbProvider.getReleaseGroup(album.id);
+          logger.info(`[TIMING] getReleaseGroup ${album.id}: ${Date.now()-t0}ms`);
+
+          t0 = Date.now();
           await this.storeReleaseGroup(album.id, fullAlbum, mbid);
+          logger.info(`[TIMING] storeReleaseGroup ${album.id}: ${Date.now()-t0}ms`);
+
           logger.info(`Stored album ${album.id} (${i + 1}/${albums.length})`);
 
+          t0 = Date.now();
           const releases = await mbProvider.getReleasesByReleaseGroup(album.id);
-          logger.info(`Fetching ${releases.length} releases for album ${album.id}`);
+          logger.info(`[TIMING] getReleasesByReleaseGroup ${album.id} (${releases.length} releases): ${Date.now()-t0}ms`);
+
           for (const release of releases) {
             try {
+              t0 = Date.now();
               const fullRelease = await mbProvider.getRelease(release.id);
+              logger.info(`[TIMING] getRelease ${release.id}: ${Date.now()-t0}ms`);
+
+              t0 = Date.now();
               await this.storeRelease(release.id, fullRelease);
-              logger.info(`Stored release ${release.id} for album ${album.id}`);
+              logger.info(`[TIMING] storeRelease ${release.id}: ${Date.now()-t0}ms`);
             } catch (err) {
               logger.error(`Failed to fetch release ${release.id}:`, err);
             }

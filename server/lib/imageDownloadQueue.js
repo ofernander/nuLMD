@@ -9,7 +9,8 @@ const imageDownloader = require('./imageDownloader');
  */
 class ImageDownloadQueue {
   constructor() {
-    this.processing = false;
+    this.activeWorkers = 0;
+    this.maxWorkers = 3;
     this.processInterval = null;
     this.lastDownloadTime = {}; // Track last download time per provider
     
@@ -83,42 +84,40 @@ class ImageDownloadQueue {
     logger.info('Starting image download queue processor');
 
     this.processInterval = setInterval(async () => {
-      if (this.processing) {
-        return; // Already processing a download
-      }
+      if (this.activeWorkers >= this.maxWorkers) return;
 
       try {
-        this.processing = true;
         const download = await this.getNextDownload();
 
         if (download) {
           const provider = download.provider || 'default';
-          
+
           // Check if we can download from this provider (rate limiting)
           if (!this.canDownloadFromProvider(provider)) {
             const rateLimit = this.providerRateLimits[provider] || this.providerRateLimits.default;
             logger.debug(`Rate limit active for ${provider}, waiting ${rateLimit}ms between requests`);
-            return; // Skip this iteration, will retry next interval
+            return;
           }
-          
-          logger.debug(`Processing download for image ${download.id} from ${provider}`);
-          
-          try {
-            await imageDownloader.processDownload(download.id);
-            // Record successful download time for this provider
-            this.recordDownload(provider);
-          } catch (error) {
-            logger.error(`Download ${download.id} processing error: ${error.message}`);
-            // Still record download attempt to maintain rate limiting
-            this.recordDownload(provider);
-          }
+
+          logger.debug(`Processing download for image ${download.id} from ${provider} [worker ${this.activeWorkers + 1}/${this.maxWorkers}]`);
+          this.activeWorkers++;
+          this.recordDownload(provider);
+          this._runDownload(download.id).finally(() => {
+            this.activeWorkers--;
+          });
         }
       } catch (error) {
         logger.error('Image download processor error:', error);
-      } finally {
-        this.processing = false;
       }
     }, intervalMs);
+  }
+
+  async _runDownload(imageId) {
+    try {
+      await imageDownloader.processDownload(imageId);
+    } catch (error) {
+      logger.error(`Download ${imageId} processing error: ${error.message}`);
+    }
   }
 
   /**
