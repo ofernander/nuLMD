@@ -547,7 +547,14 @@ router.get('/jobs/recent', async (req, res, next) => {
       FROM metadata_jobs j
       LEFT JOIN artists a ON a.mbid = j.entity_mbid
       LEFT JOIN release_groups rg ON rg.mbid = j.entity_mbid
-      ORDER BY j.created_at DESC
+      ORDER BY
+        CASE j.status
+          WHEN 'processing' THEN 0
+          WHEN 'pending'    THEN 1
+          WHEN 'failed'     THEN 2
+          WHEN 'completed'  THEN 3
+        END ASC,
+        j.created_at DESC
       LIMIT 50
     `);
     res.json(result.rows);

@@ -449,10 +449,32 @@ class ArtistService {
     
     // Check if release group exists
     const existing = await database.query(
-      'SELECT mbid FROM release_groups WHERE mbid = $1',
+      'SELECT mbid, ttl_expires_at, overview FROM release_groups WHERE mbid = $1',
       [mbid]
     );
-    
+
+    // If within TTL and has overview, skip external provider fetches
+    if (existing.rows.length > 0) {
+      const rg = existing.rows[0];
+      if (rg.ttl_expires_at && new Date(rg.ttl_expires_at) > new Date() && rg.overview) {
+        logger.info(`Release group ${mbid} within TTL, skipping external fetches`);
+        // Still ensure artist link exists
+        if (artistMbid) {
+          const link = await database.query(
+            'SELECT * FROM artist_release_groups WHERE artist_mbid = $1 AND release_group_mbid = $2',
+            [artistMbid, mbid]
+          );
+          if (link.rows.length === 0) {
+            await database.query(
+              'INSERT INTO artist_release_groups (artist_mbid, release_group_mbid, position) VALUES ($1, $2, 0)',
+              [artistMbid, mbid]
+            );
+          }
+        }
+        return;
+      }
+    }
+
     if (existing.rows.length > 0) {
       // Update existing
       await database.query(`
@@ -880,6 +902,12 @@ class ArtistService {
     if (!mbProvider) throw new Error('MusicBrainz provider not available');
 
     const album = await database.getReleaseGroup(mbid);
+
+    // Serve from cache if within TTL
+    if (album && album.ttl_expires_at && new Date(album.ttl_expires_at) > new Date()) {
+      logger.info(`Album ${mbid} within TTL, serving from DB`);
+      return lidarr.formatAlbum(mbid);
+    }
 
     if (!album) {
       logger.info(`Album ${mbid} not in DB, fetching from MusicBrainz`);

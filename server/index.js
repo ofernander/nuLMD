@@ -60,7 +60,13 @@ app.get('/artist/:mbid', async (req, res) => {
   try {
     const { mbid } = req.params;
     logger.info(`Lidarr artist request: ${mbid}`);
-    metadataJobQueue.queueJob('artist_full', 'artist', mbid, 5).catch(err => logger.error(`Failed to queue artist job ${mbid}:`, err));
+    const existingAlbums = await database.query(
+      'SELECT rg.mbid FROM release_groups rg JOIN artist_release_groups arg ON arg.release_group_mbid = rg.mbid WHERE arg.artist_mbid = $1 LIMIT 1',
+      [mbid]
+    );
+    if (existingAlbums.rows.length === 0) {
+      metadataJobQueue.queueJob('artist_full', 'artist', mbid, 5).catch(err => logger.error(`Failed to queue artist job ${mbid}:`, err));
+    }
     const formatted = await metaHandler.ensureArtist(mbid);
     res.json(formatted);
   } catch (error) {
@@ -73,7 +79,13 @@ app.get('/album/:mbid', async (req, res) => {
   try {
     const { mbid } = req.params;
     logger.info(`Lidarr album request: ${mbid}`);
-    metadataJobQueue.queueJob('fetch_album_full', 'release_group', mbid, 5).catch(err => logger.error(`Failed to queue album job ${mbid}:`, err));
+    const existingReleases = await database.query(
+      'SELECT mbid FROM releases WHERE release_group_mbid = $1 LIMIT 1',
+      [mbid]
+    );
+    if (existingReleases.rows.length === 0) {
+      metadataJobQueue.queueJob('fetch_album_full', 'release_group', mbid, 5).catch(err => logger.error(`Failed to queue album job ${mbid}:`, err));
+    }
     const formatted = await metaHandler.ensureAlbum(mbid);
     res.json(formatted);
   } catch (error) {
