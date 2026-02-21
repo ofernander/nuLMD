@@ -1,9 +1,6 @@
 // UI management functions
 const ui = {
     refreshInterval: null,
-    logAutoScroll: true,
-    lastLogLength: 0,
-    minVisibleLogs: 50,  // Minimum number of log lines to keep visible
 
     async refreshDashboard() {
         try {
@@ -12,18 +9,6 @@ const ui = {
                 api.getConfig()
             ]);
             
-            // Load debug toggle state
-            try {
-                const logLevelResponse = await fetch('/api/log-level');
-                const logLevelData = await logLevelResponse.json();
-                const debugToggle = document.getElementById('debugToggle');
-                if (debugToggle) {
-                    debugToggle.checked = logLevelData.level === 'debug';
-                }
-            } catch (error) {
-                console.error('Failed to load log level:', error);
-            }
-
             const container = document.getElementById('providerCards');
             
             if (!providers || providers.length === 0) {
@@ -97,39 +82,7 @@ const ui = {
         }
     },
 
-    async refreshLogs() {
-        try {
-            const logs = await api.getLogs();
-            const viewer = document.getElementById('logViewer');
-            
-            // Always update if logs changed
-            if (logs.length !== this.lastLogLength) {
-                if (logs.length === 0) {
-                    // No logs after filtering - keep showing last state, don't clear
-                    // Only clear on very first load or explicit clear button
-                    if (this.lastLogLength === 0) {
-                        viewer.innerHTML = '';
-                    }
-                } else {
-                    // Only show the last N logs to prevent UI slowdown
-                    const logsToShow = logs.slice(-this.minVisibleLogs);
-                    viewer.innerHTML = logsToShow.map(log => this.formatLogLine(log)).join('');
-                    this.lastLogLength = logs.length;
-                    
-                    // Auto-scroll to bottom if enabled
-                    if (this.logAutoScroll) {
-                        viewer.scrollTop = viewer.scrollHeight;
-                    }
-                }
-            }
-        } catch (error) {
-            console.error('Failed to refresh logs:', error);
-            const viewer = document.getElementById('logViewer');
-            if (!viewer.querySelector('.log-loading')) {
-                viewer.innerHTML = '<div class="log-empty">Failed to load logs</div>';
-            }
-        }
-    },
+
 
     formatLogLine(log) {
         const timestamp = new Date(log.timestamp).toLocaleTimeString();
@@ -148,23 +101,6 @@ const ui = {
         const div = document.createElement('div');
         div.textContent = text;
         return div.innerHTML;
-    },
-
-    toggleLogAutoScroll() {
-        this.logAutoScroll = !this.logAutoScroll;
-        const btn = document.getElementById('autoScrollBtn');
-        btn.textContent = `Auto-scroll: ${this.logAutoScroll ? 'ON' : 'OFF'}`;
-        
-        if (this.logAutoScroll) {
-            const viewer = document.getElementById('logViewer');
-            viewer.scrollTop = viewer.scrollHeight;
-        }
-    },
-
-    clearLogs() {
-        const viewer = document.getElementById('logViewer');
-        viewer.innerHTML = '';
-        this.lastLogLength = 0;
     },
 
     async loadMetadataSources() {
@@ -1022,11 +958,80 @@ const ui = {
         }
     },
 
+    async loadLogsTab() {
+        await this.loadLogFileList();
+        // Auto-select most recent file (first in list, sorted by modified desc)
+        const firstEntry = document.querySelector('.log-file-entry');
+        if (firstEntry) firstEntry.click();
+    },
+
+    async loadLogFileList() {
+        const container = document.getElementById('logFileList');
+        try {
+            const response = await fetch('/api/logs/files');
+            const files = await response.json();
+
+            if (files.length === 0) {
+                container.innerHTML = '<p style="color: var(--text-secondary); font-size: 0.875rem;">No log files yet</p>';
+                return;
+            }
+
+            let html = '';
+            for (const file of files) {
+                const sizeKb = Math.round(file.size_bytes / 1024);
+                const modified = new Date(file.modified_at).toLocaleDateString();
+                const isActive = this.currentLogFile === file.name;
+                html += `<div class="log-file-entry ${isActive ? 'active' : ''}" onclick="ui.selectLogFile('${file.name}')">
+                    <div class="log-file-name">${this.escapeHtml(file.name)}</div>
+                    <div class="log-file-meta">${sizeKb} KB &middot; ${modified}</div>
+                </div>`;
+            }
+
+            container.innerHTML = html;
+        } catch (error) {
+            container.innerHTML = '<p style="color: var(--text-secondary); font-size: 0.875rem;">Failed to load log files</p>';
+        }
+    },
+
+    async selectLogFile(filename) {
+        this.currentLogFile = filename;
+        this.lastLogLength = 0;
+
+        // Update active state in file list
+        await this.loadLogFileList();
+
+        const viewer = document.getElementById('logViewer');
+        const title = document.getElementById('logViewerTitle');
+
+        if (!filename) {
+            title.textContent = 'Select a log file';
+            viewer.innerHTML = '<div class="log-empty">Select a log file from the left panel</div>';
+            return;
+        }
+
+        title.textContent = filename;
+        viewer.innerHTML = '<div class="log-loading">Loading...</div>';
+
+        try {
+            const response = await fetch(`/api/logs/file?name=${encodeURIComponent(filename)}&tail=500`);
+            if (!response.ok) throw new Error('Failed to load file');
+            const logs = await response.json();
+
+            if (logs.length === 0) {
+                viewer.innerHTML = '<div class="log-empty">No log entries</div>';
+                return;
+            }
+
+            viewer.innerHTML = logs.map(log => this.formatLogLine(log)).join('');
+            viewer.scrollTop = viewer.scrollHeight;
+        } catch (error) {
+            viewer.innerHTML = `<div class="log-empty">Failed to load ${filename}</div>`;
+        }
+    },
+
     startAutoRefresh() {
-        // Refresh appropriate tab content
         this.refreshInterval = setInterval(() => {
             if (document.getElementById('dashboard-tab').classList.contains('active')) {
-                this.refreshLogs();
                 this.refreshDashboardStats();
             }
         }, 500);
@@ -1064,26 +1069,8 @@ const ui = {
         }, 5000);
     },
 
-    async toggleDebugLogging(enabled) {
-        try {
-            const level = enabled ? 'debug' : 'info';
-            const response = await fetch('/api/log-level', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ level })
-            });
-            
-            if (!response.ok) throw new Error('Failed to set log level');
-            
-            this.showSuccess(`Debug logging ${enabled ? 'enabled' : 'disabled'}`);
-        } catch (error) {
-            console.error('Failed to toggle debug logging:', error);
-            this.showError('Failed to change log level');
-            // Revert checkbox
-            document.getElementById('debugToggle').checked = !enabled;
-        }
-    }
 };
+
 
 // Export for global use
 window.ui = ui;

@@ -494,6 +494,65 @@ router.post('/refresh/all', async (req, res, next) => {
   }
 });
 
+// Log files list endpoint
+router.get('/logs/files', async (req, res, next) => {
+  try {
+    const fs = require('fs').promises;
+    const path = require('path');
+    const logsDir = path.join(__dirname, '../../logs');
+
+    const files = await fs.readdir(logsDir);
+    const logFiles = files.filter(f => f.endsWith('.log') && !f.startsWith('.'));
+
+    const fileStats = await Promise.all(logFiles.map(async (filename) => {
+      const stat = await fs.stat(path.join(logsDir, filename));
+      return {
+        name: filename,
+        size_bytes: stat.size,
+        modified_at: stat.mtime
+      };
+    }));
+
+    // Sort newest modified first
+    fileStats.sort((a, b) => new Date(b.modified_at) - new Date(a.modified_at));
+
+    res.json(fileStats);
+  } catch (error) {
+    if (error.code === 'ENOENT') return res.json([]);
+    next(error);
+  }
+});
+
+// Log file content endpoint
+router.get('/logs/file', async (req, res, next) => {
+  try {
+    const fs = require('fs').promises;
+    const path = require('path');
+    const { name, tail = 500 } = req.query;
+
+    if (!name) return res.status(400).json({ error: 'name parameter required' });
+
+    // Prevent path traversal
+    const safeName = path.basename(name);
+    const filePath = path.join(__dirname, '../../logs', safeName);
+
+    const content = await fs.readFile(filePath, 'utf8');
+    const lines = content.split('\n').filter(Boolean);
+    const tailLines = lines.slice(-parseInt(tail));
+
+    // Parse JSON log lines
+    const parsed = tailLines.map(line => {
+      try { return JSON.parse(line); }
+      catch { return { timestamp: null, level: 'info', message: line }; }
+    });
+
+    res.json(parsed);
+  } catch (error) {
+    if (error.code === 'ENOENT') return res.status(404).json({ error: 'Log file not found' });
+    next(error);
+  }
+});
+
 // Log tail endpoint
 router.get('/logs/tail', (req, res) => {
   const { lines = 100 } = req.query;

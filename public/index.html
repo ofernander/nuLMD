@@ -28,6 +28,7 @@
             <button class="tab" data-tab="browser">Metadata Browser</button>
             <button class="tab" data-tab="sources">Metadata Sources</button>
             <button class="tab" data-tab="testing">Fetch Metadata</button>
+            <button class="tab" data-tab="logs">Logs</button>
         </nav>
 
         <main>
@@ -73,35 +74,6 @@
                     </div>
                 </div>
 
-                <div class="card">
-                    <h2>Enabled Metadata Providers</h2>
-                    <div id="providerCards" class="provider-grid-simple">
-                        <p>Loading providers...</p>
-                    </div>
-                </div>
-
-                <div class="card">
-                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
-                        <h2>Live Activity</h2>
-                        <div style="display: flex; gap: 10px; align-items: center;">
-                            <label style="display: flex; align-items: center; gap: 5px; color: var(--text-secondary); font-size: 0.875rem;">
-                                Lines:
-                                <input type="number" id="minLogsInput" value="50" min="10" max="500" 
-                                       style="width: 60px; padding: 4px; background: var(--bg-tertiary); border: 1px solid var(--border); color: var(--text); border-radius: 4px;"
-                                       onchange="ui.minVisibleLogs = parseInt(this.value); ui.lastLogLength = 0;">
-                            </label>
-                            <label style="display: flex; align-items: center; gap: 5px; color: var(--text-secondary); font-size: 0.875rem; cursor: pointer;">
-                                <input type="checkbox" id="debugToggle" onchange="ui.toggleDebugLogging(this.checked)" style="cursor: pointer;">
-                                Debug
-                            </label>
-                            <button class="btn btn-secondary btn-sm" onclick="ui.toggleLogAutoScroll()" id="autoScrollBtn">Auto-scroll: ON</button>
-                            <button class="btn btn-secondary btn-sm" onclick="ui.clearLogs()">Clear</button>
-                        </div>
-                    </div>
-                    <div id="logViewer" class="log-viewer">
-                        <div class="log-loading">Connecting to log stream...</div>
-                    </div>
-                </div>
             </section>
 
 
@@ -124,6 +96,13 @@
 
             <!-- Metadata Sources Tab -->
             <section id="sources-tab" class="tab-content">
+                <div class="card">
+                    <h2>Enabled Metadata Providers</h2>
+                    <div id="providerCards" class="provider-grid-simple">
+                        <p>Loading providers...</p>
+                    </div>
+                </div>
+
                 <div class="card">
                     <h2>Metadata Sources</h2>
                     <div class="alert alert-info">
@@ -158,6 +137,23 @@
                     <div id="testResults" class="test-results"></div>
                 </div>
             </section>
+
+            <!-- Logs Tab -->
+            <section id="logs-tab" class="tab-content">
+                <div style="display: grid; grid-template-columns: 260px 1fr; gap: 1.5rem; align-items: start;">
+                    <div class="card" style="position: sticky; top: 1rem;">
+                        <h2>Log Files</h2>
+                        <div id="logFileList"><p style="color: var(--text-secondary); font-size: 0.875rem;">Loading...</p></div>
+                    </div>
+
+                    <div class="card">
+                        <h2 id="logViewerTitle" style="margin-bottom: 1rem;">Select a log file</h2>
+                        <div id="logViewer" class="log-viewer">
+                            <div class="log-loading">Loading...</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
         </main>
 
         <footer>
@@ -165,7 +161,7 @@
         </footer>
     </div>
 
-    <script src="/js/main.js?v=5"></script>
-    <script src="/js/ui.js?v=5"></script>
+    <script src="/js/main.js?v=9"></script>
+    <script src="/js/ui.js?v=9"></script>
 </body>
 </html>

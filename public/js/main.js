@@ -91,10 +91,6 @@ const api = {
         return this.get(`/album/${provider}/${id}/tracks`);
     },
 
-    async getLogs(lines = 100) {
-        return this.get(`/logs/tail?lines=${lines}`);
-    },
-
     async restartServer() {
         return this.post('/restart');
     }
@@ -122,10 +118,13 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (tabName === 'browser') {
                 ui.loadMetadataBrowser();
             } else if (tabName === 'sources') {
+                ui.refreshDashboard();
                 ui.loadMetadataSources();
             } else if (tabName === 'dashboard') {
                 ui.refreshDashboard();
                 ui.refreshDashboardStats();
+            } else if (tabName === 'logs') {
+                ui.loadLogsTab();
             }
         });
     });
