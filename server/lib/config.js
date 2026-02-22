@@ -55,9 +55,6 @@ class Config {
         coverartarchive: {
           enabled: false  // Album cover downloads - default OFF (Lidarr handles this)
         },
-        theaudiodb: {
-          enabled: false  // Secondary image source - default OFF
-        },
         fanart: {
           enabled: !!process.env.FANART_API_KEY,  // Auto-enable if API key in environment
           apiKey: process.env.FANART_API_KEY || ''  // Get free key from https://fanart.tv/get-an-api-key/
@@ -74,6 +71,12 @@ class Config {
       lidarr: {
         compatibilityMode: 'plugin', // or 'legacy'
         metadataProfile: 'default'
+      },
+      metadata: {
+        fetchTypes: {
+          albumTypes: ['Studio', 'EP', 'Single'], // Which release types to fetch — mirrors Metadata Browser filter
+          releaseStatuses: ['Official'] // Release status filter — empty = no status filter
+        }
       },
       refresh: {
         artistTTL: parseInt(process.env.ARTIST_TTL_DAYS) || 7, // Days before artist data expires

@@ -2,6 +2,8 @@ const axios = require('axios');
 const { logger } = require('../lib/logger');
 
 class FanartProvider {
+  static capabilities = { artistImages: true, albumImages: false };
+
   constructor(config) {
     this.baseURL = 'https://webservice.fanart.tv/v3';
     this.name = 'fanart';

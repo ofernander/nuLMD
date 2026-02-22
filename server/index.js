@@ -13,7 +13,7 @@ const metaHandler = require('./lib/metaHandler');
 const search = require('./lib/search');
 const { registry } = require('./lib/providerRegistry');
 const { initializeProviders } = require('./lib/providerRegistry');
-const metadataJobQueue = require('./lib/metadataJobQueue');
+const backgroundJobQueue = require('./lib/backgroundJobQueue');
 const { processJob } = require('./lib/jobProcessor');
 const imageDownloadQueue = require('./lib/imageDownloadQueue');
 const bulkRefresher = require('./lib/bulkRefresher');
@@ -60,7 +60,13 @@ app.get('/artist/:mbid', async (req, res) => {
   try {
     const { mbid } = req.params;
     logger.info(`Lidarr artist request: ${mbid}`);
-    metadataJobQueue.queueJob('artist_full', 'artist', mbid, 5).catch(err => logger.error(`Failed to queue artist job ${mbid}:`, err));
+    const existingAlbums = await database.query(
+      'SELECT rg.mbid FROM release_groups rg JOIN artist_release_groups arg ON arg.release_group_mbid = rg.mbid WHERE arg.artist_mbid = $1 LIMIT 1',
+      [mbid]
+    );
+    if (existingAlbums.rows.length === 0) {
+      backgroundJobQueue.queueJob('artist_full', 'artist', mbid, 5).catch(err => logger.error(`Failed to queue artist job ${mbid}:`, err));
+    }
     const formatted = await metaHandler.ensureArtist(mbid);
     res.json(formatted);
   } catch (error) {
@@ -73,7 +79,13 @@ app.get('/album/:mbid', async (req, res) => {
   try {
     const { mbid } = req.params;
     logger.info(`Lidarr album request: ${mbid}`);
-    metadataJobQueue.queueJob('fetch_album_full', 'release_group', mbid, 5).catch(err => logger.error(`Failed to queue album job ${mbid}:`, err));
+    const existingReleases = await database.query(
+      'SELECT mbid FROM releases WHERE release_group_mbid = $1 LIMIT 1',
+      [mbid]
+    );
+    if (existingReleases.rows.length === 0) {
+      backgroundJobQueue.queueJob('fetch_album_full', 'release_group', mbid, 5).catch(err => logger.error(`Failed to queue album job ${mbid}:`, err));
+    }
     const formatted = await metaHandler.ensureAlbum(mbid);
     res.json(formatted);
   } catch (error) {
@@ -185,12 +197,12 @@ async function start() {
     await initializeProviders();
     logger.info('Metadata providers initialized');
 
-    // Start background job processor
-    await metadataJobQueue.startProcessor(processJob, 1000); // Check for jobs every 1 second
-    logger.info('Metadata job processor started');
+    // Start background job queue (MB + wiki + image worker pools)
+    await backgroundJobQueue.startProcessor(processJob, 1000);
+    logger.info('Background job queue started');
 
-    // Start image download queue processor (runs independently with per-provider rate limiting)
-    await imageDownloadQueue.startProcessor(500); // Check every 500ms, rate limiting handled per-provider
+    // Start image download queue (downloads stored URLs to disk)
+    await imageDownloadQueue.startProcessor(500);
     logger.info('Image download queue processor started');
 
     // Start bulk refresh scheduler (runs daily at 3am)
@@ -214,7 +226,7 @@ async function start() {
 // Graceful shutdown
 process.on('SIGTERM', () => {
   logger.info('SIGTERM received, shutting down gracefully');
-  metadataJobQueue.stopProcessor();
+  backgroundJobQueue.stopProcessor();
   imageDownloadQueue.stopProcessor();
   bulkRefresher.stop();
   process.exit(0);
@@ -222,7 +234,7 @@ process.on('SIGTERM', () => {
 
 process.on('SIGINT', () => {
   logger.info('SIGINT received, shutting down gracefully');
-  metadataJobQueue.stopProcessor();
+  backgroundJobQueue.stopProcessor();
   imageDownloadQueue.stopProcessor();
   bulkRefresher.stop();
   process.exit(0);

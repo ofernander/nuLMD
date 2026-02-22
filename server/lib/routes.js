@@ -6,7 +6,7 @@ const cache = require('./cache');
 const { logger, getRecentLogs } = require('./logger');
 const metaHandler = require('./metaHandler');
 const lidarr = require('./lidarr');
-const metadataJobQueue = require('./metadataJobQueue');
+const backgroundJobQueue = require('./backgroundJobQueue');
 const database = require('../sql/database');
 
 // API version
@@ -21,7 +21,7 @@ router.get('/version', (req, res) => {
 // Job queue stats
 router.get('/jobs/stats', async (req, res, next) => {
   try {
-    const stats = await metadataJobQueue.getStats();
+    const stats = await backgroundJobQueue.getStats();
     res.json(stats);
   } catch (error) {
     next(error);
@@ -33,7 +33,7 @@ router.get('/stats', async (req, res, next) => {
   try {
     const [dbStats, jobStats] = await Promise.all([
       database.getStats(),
-      metadataJobQueue.getStats()
+      backgroundJobQueue.getStats()
     ]);
     
     // Calculate uptime
@@ -437,7 +437,7 @@ router.get('/metadata/album-tracks/:mbid', async (req, res, next) => {
 router.post('/ui/fetch-artist/:mbid', async (req, res, next) => {
   try {
     const { mbid } = req.params;
-    await metadataJobQueue.queueJob('artist_full', 'artist', mbid, 10);
+    await backgroundJobQueue.queueJob('artist_full', 'artist', mbid, 10);
     logger.info(`UI artist fetch queued for ${mbid}`);
     res.json({ success: true, message: `Fetch queued for ${mbid}` });
   } catch (error) {
@@ -448,7 +448,7 @@ router.post('/ui/fetch-artist/:mbid', async (req, res, next) => {
 router.post('/ui/fetch-album/:mbid', async (req, res, next) => {
   try {
     const { mbid } = req.params;
-    await metadataJobQueue.queueJob('fetch_album_full', 'release_group', mbid, 10);
+    await backgroundJobQueue.queueJob('fetch_album_full', 'release_group', mbid, 10);
     logger.info(`UI album fetch queued for ${mbid}`);
     res.json({ success: true, message: `Fetch queued for ${mbid}` });
   } catch (error) {
@@ -547,7 +547,14 @@ router.get('/jobs/recent', async (req, res, next) => {
       FROM metadata_jobs j
       LEFT JOIN artists a ON a.mbid = j.entity_mbid
       LEFT JOIN release_groups rg ON rg.mbid = j.entity_mbid
-      ORDER BY j.created_at DESC
+      ORDER BY
+        CASE j.status
+          WHEN 'processing' THEN 0
+          WHEN 'pending'    THEN 1
+          WHEN 'failed'     THEN 2
+          WHEN 'completed'  THEN 3
+        END ASC,
+        j.created_at DESC
       LIMIT 50
     `);
     res.json(result.rows);

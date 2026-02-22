@@ -2,6 +2,8 @@ const BaseProvider = require('./base');
 const { logger } = require('../lib/logger');
 
 class CoverArtArchiveProvider extends BaseProvider {
+  static capabilities = { artistImages: false, albumImages: true };
+
   constructor(config) {
     const providerConfig = {
       ...config,

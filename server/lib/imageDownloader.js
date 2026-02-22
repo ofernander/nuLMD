@@ -211,11 +211,6 @@ class ImageDownloader {
         `, [localPath, imageId]);
         
         logger.info(`Successfully downloaded and cached image ${imageId}: ${localPath}`);
-        
-        // Add small delay after successful download to avoid hammering CDN
-        // Even though job queue processes sequentially, this adds extra buffer
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        
         return;
         
       } catch (error) {

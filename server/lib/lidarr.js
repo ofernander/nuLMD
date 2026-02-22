@@ -75,6 +75,48 @@ class LidarrFormatter {
     };
   }
 
+  async getArtistsBatch(mbids) {
+    if (!mbids.length) return new Map();
+    const result = await database.query(
+      'SELECT * FROM artists WHERE mbid = ANY($1)',
+      [mbids]
+    );
+    return new Map(result.rows.map(a => [a.mbid, a]));
+  }
+
+  async getLinksBatch(entityType, mbids) {
+    if (!mbids.length) return new Map();
+    const result = await database.query(
+      'SELECT entity_mbid, link_type, url FROM links WHERE entity_type = $1 AND entity_mbid = ANY($2)',
+      [entityType, mbids]
+    );
+    const map = new Map();
+    result.rows.forEach(row => {
+      if (!map.has(row.entity_mbid)) map.set(row.entity_mbid, []);
+      map.get(row.entity_mbid).push({ target: row.url, type: row.link_type });
+    });
+    return map;
+  }
+
+  async getImagesBatch(entityType, mbids) {
+    if (!mbids.length) return new Map();
+    const serverUrl = this.getServerUrl();
+    const path = require('path');
+    const result = await database.query(
+      'SELECT entity_mbid, url, cover_type, cached, local_path FROM images WHERE entity_type = $1 AND entity_mbid = ANY($2)',
+      [entityType, mbids]
+    );
+    const map = new Map();
+    result.rows.forEach(row => {
+      if (!map.has(row.entity_mbid)) map.set(row.entity_mbid, []);
+      const url = row.cached && row.local_path
+        ? `${serverUrl}/api/images/${entityType}/${row.entity_mbid}/${path.basename(row.local_path)}`
+        : row.url;
+      map.get(row.entity_mbid).push({ CoverType: row.cover_type, Url: url });
+    });
+    return map;
+  }
+
   async formatAlbum(mbid) {
     const releaseGroup = await database.getReleaseGroup(mbid);
     if (!releaseGroup) {
@@ -92,22 +134,41 @@ class LidarrFormatter {
     // Extract primary artist ID
     const artistId = artistCredit && artistCredit.length > 0 ? artistCredit[0].artist.id : '';
 
-    // Create artistMap and populate with album artists
+    // Create artistMap and populate with album artists — batch fetch (3 queries regardless of artist count)
     const artistMap = new Map();
     if (artistCredit && artistCredit.length > 0) {
+      const artistMbids = artistCredit.map(c => c.artist.id);
+      const artistsMap = await this.getArtistsBatch(artistMbids);
+      const linksMap = await this.getLinksBatch('artist', artistMbids);
+      const imagesMap = await this.getImagesBatch('artist', artistMbids);
+
       for (const credit of artistCredit) {
-        const fullArtist = await database.getArtist(credit.artist.id);
-        if (fullArtist) {
-          const formatted = await this.formatArtistForAlbum(credit.artist.id);
-          artistMap.set(credit.artist.id, formatted);
+        const id = credit.artist.id;
+        const a = artistsMap.get(id);
+        if (a) {
+          artistMap.set(id, {
+            artistaliases: this.parseJson(a.aliases) || [],
+            artistname: a.name,
+            disambiguation: a.disambiguation || '',
+            genres: this.parseJson(a.genres) || [],
+            id: a.mbid,
+            images: imagesMap.get(id) || [],
+            links: linksMap.get(id) || [],
+            oldids: [],
+            overview: a.overview || '',
+            rating: a.rating ? { Count: 0, Value: parseFloat(a.rating) } : { Count: 0, Value: null },
+            sortname: a.sort_name,
+            status: a.ended ? 'ended' : 'active',
+            type: a.type || null
+          });
         } else {
-          // Fallback if artist not in DB - must match lowercase format for albums
-          artistMap.set(credit.artist.id, {
+          // Fallback if artist not in DB
+          artistMap.set(id, {
             artistaliases: [],
             artistname: credit.artist.name,
             disambiguation: credit.artist.disambiguation || '',
             genres: [],
-            id: credit.artist.id,
+            id: id,
             images: [],
             links: [],
             oldids: [],
