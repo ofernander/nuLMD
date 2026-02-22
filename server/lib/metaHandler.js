@@ -103,60 +103,9 @@ class ArtistService {
       links: data.links || data.Links || []
     };
     
-    // Fetch Wikipedia overview if we have full data and no overview yet
-    if (isFullData && !artistData.overview) {
-      const WikipediaProvider = require('../providers/wikipedia');
-      const wikidataId = WikipediaProvider.extractWikidataId(data.relations || []);
-      
-      if (wikidataId || artistData.name) {
-        const wikiProvider = registry.getProvider('wikipedia');
-        if (wikiProvider) {
-          try {
-            const overview = await wikiProvider.getArtistOverview(wikidataId, artistData.name, artistData.type);
-            if (overview) {
-              artistData.overview = overview;
-              logger.info(`Fetched Wikipedia overview for ${artistData.name} (${overview.length} chars)`);
-            }
-          } catch (error) {
-            logger.error(`Failed to fetch Wikipedia overview for ${artistData.name}:`, error.message);
-          }
-        }
-      }
-    }
-    
-    // Fetch artist images if we have full data
-    let images = [];
-    if (isFullData) {
-      const tadbProvider = registry.getProvider('theaudiodb');
-      if (tadbProvider) {
-        try {
-          images = await tadbProvider.getArtistImages(artistData.name, mbid);
-          if (images.length > 0) {
-            logger.info(`Fetched ${images.length} images for ${artistData.name} from TheAudioDB`);
-          }
-        } catch (error) {
-          logger.error(`Failed to fetch TheAudioDB images for ${artistData.name}:`, error.message);
-        }
-      }
-      
-      // If TheAudioDB didn't return images, try Fanart.tv
-      if (images.length === 0) {
-        const fanartProvider = registry.getProvider('fanart');
-        if (fanartProvider) {
-          try {
-            const fanartImages = await fanartProvider.getArtistImages(mbid);
-            if (fanartImages.length > 0) {
-              images = fanartImages;
-              logger.info(`Fetched ${images.length} images for ${artistData.name} from Fanart.tv`);
-            }
-          } catch (error) {
-            logger.error(`Failed to fetch Fanart.tv images for ${artistData.name}:`, error.message);
-          }
-        }
-      }
-    }
-    
-    artistData.images = images;
+    // Wikipedia and images handled by dedicated background queues
+    // wikiJobQueue handles Wikipedia, providerImageQueue handles TADB/Fanart
+    artistData.images = [];
     
     // Check if artist exists
     const existing = await database.query(
@@ -260,37 +209,28 @@ class ArtistService {
       logger.info(`Artist ${mbid} has no links to store`);
     }
     
-    // Store images with provider tracking
-    if (artistData.images && artistData.images.length > 0) {
-      logger.info(`Artist ${mbid} has ${artistData.images.length} images to store`);
-      const imagesWithProvider = artistData.images.map(img => ({
-        ...img,
-        Provider: img.Provider || 'theaudiodb'
-      }));
-      await this.storeImages('artist', mbid, imagesWithProvider, 'theaudiodb');
-    } else {
-      logger.info(`Artist ${mbid} has no images to store`);
+    // Queue wiki and image fetch jobs (handled by background queue worker pools)
+    if (isFullData) {
+      const backgroundJobQueue = require('./backgroundJobQueue');
+      await backgroundJobQueue.queueJob('fetch_artist_wiki', 'artist', mbid, 1);
+      if (backgroundJobQueue.hasArtistImageProvider()) {
+        await backgroundJobQueue.queueJob('fetch_artist_images', 'artist', mbid, 1);
+      }
     }
   }
   
   async storeLinks(entityType, entityMbid, links) {
-    // Delete existing links for this entity
-    await database.query(
-      'DELETE FROM links WHERE entity_type = $1 AND entity_mbid = $2',
-      [entityType, entityMbid]
-    );
-    
-    // Insert new links
     for (const link of links) {
       const url = typeof link === 'string' ? link : link.url;
       const linkType = typeof link === 'object' ? link.type : 'official';
-      
+
       await database.query(`
         INSERT INTO links (entity_type, entity_mbid, link_type, url)
         VALUES ($1, $2, $3, $4)
+        ON CONFLICT (entity_mbid, link_type, url) DO NOTHING
       `, [entityType, entityMbid, linkType, url]);
     }
-    
+
     logger.info(`Stored ${links.length} links for ${entityType} ${entityMbid}`);
   }
   
@@ -360,85 +300,10 @@ class ArtistService {
       artistName = artist ? artist.name : null;
     }
     
-    // Fetch Wikipedia overview for the album
-    let albumOverview = data.overview || '';
-    if (!albumOverview) {
-      // Check DB first — another worker may have already fetched it
-      const existingRg = await database.query(
-        'SELECT overview FROM release_groups WHERE mbid = $1',
-        [mbid]
-      );
-      if (existingRg.rows[0]?.overview) {
-        albumOverview = existingRg.rows[0].overview;
-        logger.info(`[TIMING] Wikipedia album overview "${data.title}": skipped (DB hit)`);
-      }
-    }
-    if (!albumOverview) {
-      const WikipediaProvider = require('../providers/wikipedia');
-      const wikidataId = WikipediaProvider.extractWikidataId(data.relations || []);
-      
-      if (wikidataId || data.title) {
-        const wikiProvider = registry.getProvider('wikipedia');
-        if (wikiProvider) {
-          try {
-            const tw = Date.now();
-            const overview = await wikiProvider.getAlbumOverview(wikidataId, data.title, artistName);
-            logger.info(`[TIMING] Wikipedia album overview "${data.title}": ${Date.now()-tw}ms`);
-            if (overview) {
-              albumOverview = overview;
-            }
-          } catch (error) {
-            logger.error(`Failed to fetch Wikipedia overview for album "${data.title}":`, error.message);
-          }
-        }
-      }
-    }
-    
-    // Fetch album images - try providers in priority order
-    let albumImages = [];
-    
-    // Priority 1: Cover Art Archive (MusicBrainz official, no hotlink protection)
-    const caaProvider = registry.getProvider('coverartarchive');
-    if (caaProvider) {
-      try {
-        const tc = Date.now();
-        albumImages = await caaProvider.getAlbumImages(mbid);
-        logger.info(`[TIMING] CAA images "${data.title}": ${Date.now()-tc}ms (${albumImages.length} found)`);
-      } catch (error) {
-        logger.warn(`Failed to fetch CoverArtArchive album images for "${data.title}":`, error.message);
-      }
-    }
-    
-    // Priority 2: TheAudioDB (if CAA didn't return images)
-    if (albumImages.length === 0 && artistName && data.title) {
-      const tadbProvider = registry.getProvider('theaudiodb');
-      if (tadbProvider) {
-        try {
-          const tt = Date.now();
-          albumImages = await tadbProvider.getAlbumImages(data.title, artistName, mbid);
-          logger.info(`[TIMING] TADB images "${data.title}": ${Date.now()-tt}ms (${albumImages.length} found)`);
-        } catch (error) {
-          logger.error(`Failed to fetch TheAudioDB album images for "${data.title}":`, error.message);
-        }
-      }
-    }
-    
-    // Priority 3: Fanart.tv (if both CAA and TheAudioDB didn't return images)
-    if (albumImages.length === 0) {
-      const fanartProvider = registry.getProvider('fanart');
-      if (fanartProvider && fanartProvider.getAlbumImages) {
-        try {
-          const tf = Date.now();
-          const fanartImages = await fanartProvider.getAlbumImages(mbid);
-          logger.info(`[TIMING] Fanart images "${data.title}": ${Date.now()-tf}ms (${fanartImages.length} found)`);
-          if (fanartImages.length > 0) {
-            albumImages = fanartImages;
-          }
-        } catch (error) {
-          logger.error(`Failed to fetch Fanart.tv album images for "${data.title}":`, error.message);
-        }
-      }
-    }
+    // Overview and images are fetched by dedicated background queues
+    // wikiJobQueue handles Wikipedia, providerImageQueue handles CAA/TADB/Fanart
+    const albumOverview = data.overview || '';
+    const albumImages = [];
     
     // Check if release group exists
     const existing = await database.query(
@@ -468,77 +333,51 @@ class ArtistService {
       }
     }
 
-    if (existing.rows.length > 0) {
-      // Update existing
-      await database.query(`
-        UPDATE release_groups SET
-          title = $1,
-          disambiguation = $2,
-          primary_type = $3,
-          secondary_types = $4,
-          first_release_date = $5,
-          artist_credit = $6,
-          aliases = $7,
-          tags = $8,
-          genres = $9,
-          rating = $10,
-          overview = $11,
-          last_updated_at = NOW(),
-          ttl_expires_at = $12
-        WHERE mbid = $13
-      `, [
-        data.title,
-        data.disambiguation || '',
-        data.primaryType || data['primary-type'],
-        JSON.stringify(data.secondaryTypes || []),
-        releaseDate,
-        JSON.stringify(data.artistCredit || []),
-        JSON.stringify(data.aliases || []),
-        JSON.stringify(data.tags || []),
-        JSON.stringify(data.genres || []),
-        data.rating || null,
-        albumOverview,
-        ttlExpires,
-        mbid
-      ]);
-    } else {
-      // Insert new
-      await database.query(`
-        INSERT INTO release_groups (
-          mbid, title, disambiguation, primary_type, secondary_types,
-          first_release_date, artist_credit, aliases, tags, genres, rating, overview, ttl_expires_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-      `, [
-        mbid,
-        data.title,
-        data.disambiguation || '',
-        data.primaryType || data['primary-type'],
-        JSON.stringify(data.secondaryTypes || []),
-        releaseDate,
-        JSON.stringify(data.artistCredit || []),
-        JSON.stringify(data.aliases || []),
-        JSON.stringify(data.tags || []),
-        JSON.stringify(data.genres || []),
-        data.rating || null,
-        albumOverview,
-        ttlExpires
-      ]);
-    }
+    await database.query(`
+      INSERT INTO release_groups (
+        mbid, title, disambiguation, primary_type, secondary_types,
+        first_release_date, artist_credit, aliases, tags, genres, rating, overview, ttl_expires_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+      ON CONFLICT (mbid) DO UPDATE SET
+        title = EXCLUDED.title,
+        disambiguation = EXCLUDED.disambiguation,
+        primary_type = EXCLUDED.primary_type,
+        secondary_types = EXCLUDED.secondary_types,
+        first_release_date = EXCLUDED.first_release_date,
+        artist_credit = EXCLUDED.artist_credit,
+        aliases = EXCLUDED.aliases,
+        tags = EXCLUDED.tags,
+        genres = EXCLUDED.genres,
+        rating = EXCLUDED.rating,
+        overview = EXCLUDED.overview,
+        last_updated_at = NOW(),
+        ttl_expires_at = EXCLUDED.ttl_expires_at
+    `, [
+      mbid,
+      data.title,
+      data.disambiguation || '',
+      data.primaryType || data['primary-type'],
+      JSON.stringify(data.secondaryTypes || []),
+      releaseDate,
+      JSON.stringify(data.artistCredit || []),
+      JSON.stringify(data.aliases || []),
+      JSON.stringify(data.tags || []),
+      JSON.stringify(data.genres || []),
+      data.rating || null,
+      albumOverview,
+      ttlExpires
+    ]);
     
     // Store links
     if (data.links && data.links.length > 0) {
       await this.storeLinks('release_group', mbid, data.links);
     }
-    
-    // Store album images with provider tracking
-    if (albumImages.length > 0) {
-      let usedProvider = 'unknown';
-      if (albumImages[0].Provider) {
-        usedProvider = albumImages[0].Provider;
-      }
-      await this.storeImages('release_group', mbid, albumImages, usedProvider);
-    }
-    
+
+    // Queue wiki job (handled by background queue worker pool)
+    // Image job NOT queued here — only queued when Lidarr explicitly requests this album via ensureAlbum
+    const backgroundJobQueue = require('./backgroundJobQueue');
+    await backgroundJobQueue.queueJob('fetch_album_wiki', 'release_group', mbid, 1);
+
     // Link artist to release group if not already linked
     if (artistMbid) {
       const link = await database.query(
@@ -615,66 +454,39 @@ class ArtistService {
     const mediaCount = media.length;
     const trackCount = media.reduce((sum, m) => sum + (m['track-count'] || m.trackCount || 0), 0);
 
-    // Check if release exists
-    const existing = await database.query(
-      'SELECT mbid FROM releases WHERE mbid = $1',
-      [mbid]
-    );
-
-    if (existing.rows.length > 0) {
-      // Update existing
-      await database.query(`
-        UPDATE releases SET
-          title = $1,
-          status = $2,
-          release_date = $3,
-          country = $4,
-          barcode = $5,
-          labels = $6,
-          artist_credit = $7,
-          media_count = $8,
-          track_count = $9,
-          disambiguation = $10,
-          media = $11,
-          last_updated_at = NOW()
-        WHERE mbid = $12
-      `, [
-        data.title,
-        data.status,
-        releaseDate,
-        data.country,
-        data.barcode || null,
-        JSON.stringify(data['label-info'] || data.labelInfo || []),
-        JSON.stringify(data['artist-credit'] || []),
-        mediaCount,
-        trackCount,
-        data.disambiguation || '',
-        JSON.stringify(media),
-        mbid
-      ]);
-    } else {
-      // Insert new
-      await database.query(`
-        INSERT INTO releases (
-          mbid, release_group_mbid, title, status, release_date, country,
-          barcode, labels, artist_credit, media_count, track_count, disambiguation, media
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-      `, [
-        mbid,
-        releaseGroupMbid,
-        data.title,
-        data.status,
-        releaseDate,
-        data.country,
-        data.barcode || null,
-        JSON.stringify(data['label-info'] || data.labelInfo || []),
-        JSON.stringify(data['artist-credit'] || []),
-        mediaCount,
-        trackCount,
-        data.disambiguation || '',
-        JSON.stringify(media)
-      ]);
-    }
+    await database.query(`
+      INSERT INTO releases (
+        mbid, release_group_mbid, title, status, release_date, country,
+        barcode, labels, artist_credit, media_count, track_count, disambiguation, media
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+      ON CONFLICT (mbid) DO UPDATE SET
+        title = EXCLUDED.title,
+        status = EXCLUDED.status,
+        release_date = EXCLUDED.release_date,
+        country = EXCLUDED.country,
+        barcode = EXCLUDED.barcode,
+        labels = EXCLUDED.labels,
+        artist_credit = EXCLUDED.artist_credit,
+        media_count = EXCLUDED.media_count,
+        track_count = EXCLUDED.track_count,
+        disambiguation = EXCLUDED.disambiguation,
+        media = EXCLUDED.media,
+        last_updated_at = NOW()
+    `, [
+      mbid,
+      releaseGroupMbid,
+      data.title,
+      data.status,
+      releaseDate,
+      data.country,
+      data.barcode || null,
+      JSON.stringify(data['label-info'] || data.labelInfo || []),
+      JSON.stringify(data['artist-credit'] || []),
+      mediaCount,
+      trackCount,
+      data.disambiguation || '',
+      JSON.stringify(media)
+    ]);
 
     // Store recordings/tracks if present
     if (media && media.length > 0) {
@@ -702,87 +514,51 @@ class ArtistService {
   }
 
   async storeRecording(mbid, data) {
-    const existing = await database.query(
-      'SELECT mbid FROM recordings WHERE mbid = $1',
-      [mbid]
-    );
-
     const length = data.length || data.duration || null;
 
-    if (existing.rows.length > 0) {
-      await database.query(`
-        UPDATE recordings SET
-          title = $1,
-          disambiguation = $2,
-          length_ms = $3,
-          last_updated_at = NOW()
-        WHERE mbid = $4
-      `, [
-        data.title,
-        data.disambiguation || '',
-        length,
-        mbid
-      ]);
-    } else {
-      await database.query(`
-        INSERT INTO recordings (mbid, title, disambiguation, length_ms)
-        VALUES ($1, $2, $3, $4)
-      `, [
-        mbid,
-        data.title,
-        data.disambiguation || '',
-        length
-      ]);
-    }
+    await database.query(`
+      INSERT INTO recordings (mbid, title, disambiguation, length_ms)
+      VALUES ($1, $2, $3, $4)
+      ON CONFLICT (mbid) DO UPDATE SET
+        title = EXCLUDED.title,
+        disambiguation = EXCLUDED.disambiguation,
+        length_ms = EXCLUDED.length_ms,
+        last_updated_at = NOW()
+    `, [
+      mbid,
+      data.title,
+      data.disambiguation || '',
+      length
+    ]);
   }
 
   async storeTrack(trackId, data, releaseMbid, recordingMbid, mediumPosition) {
-    const existing = await database.query(
-      'SELECT mbid FROM tracks WHERE mbid = $1',
-      [trackId]
-    );
-
     const position = data.position || data.number || 0;
     const title = data.title || '';
     const length = data.length || data.duration || null;
     const artistCredit = data['artist-credit'] || [];
 
-    if (existing.rows.length > 0) {
-      await database.query(`
-        UPDATE tracks SET
-          recording_mbid = $1,
-          release_mbid = $2,
-          position = $3,
-          medium_number = $4,
-          title = $5,
-          length_ms = $6,
-          artist_credit = $7
-        WHERE mbid = $8
-      `, [
-        recordingMbid,
-        releaseMbid,
-        position,
-        mediumPosition,
-        title,
-        length,
-        JSON.stringify(artistCredit),
-        trackId
-      ]);
-    } else {
-      await database.query(`
-        INSERT INTO tracks (mbid, recording_mbid, release_mbid, position, medium_number, title, length_ms, artist_credit)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-      `, [
-        trackId,
-        recordingMbid,
-        releaseMbid,
-        position,
-        mediumPosition,
-        title,
-        length,
-        JSON.stringify(artistCredit)
-      ]);
-    }
+    await database.query(`
+      INSERT INTO tracks (mbid, recording_mbid, release_mbid, position, medium_number, title, length_ms, artist_credit)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      ON CONFLICT (mbid) DO UPDATE SET
+        recording_mbid = EXCLUDED.recording_mbid,
+        release_mbid = EXCLUDED.release_mbid,
+        position = EXCLUDED.position,
+        medium_number = EXCLUDED.medium_number,
+        title = EXCLUDED.title,
+        length_ms = EXCLUDED.length_ms,
+        artist_credit = EXCLUDED.artist_credit
+    `, [
+      trackId,
+      recordingMbid,
+      releaseMbid,
+      position,
+      mediumPosition,
+      title,
+      length,
+      JSON.stringify(artistCredit)
+    ]);
   }
   
   /**
@@ -871,32 +647,22 @@ class ArtistService {
       const albums = await mbProvider.getArtistAlbums(mbid);
       logger.info(`Found ${albums.length} albums for artist ${mbid}`);
 
-      for (let i = 0; i < albums.length; i++) {
-        const album = albums[i];
+      const filteredAlbums = albums.filter(a => this.matchesFetchTypeFilter(a));
+      logger.info(`Fetching ${filteredAlbums.length}/${albums.length} albums after type filter for artist ${mbid}`);
+
+      for (let i = 0; i < filteredAlbums.length; i++) {
+        const album = filteredAlbums[i];
         try {
-          let t0 = Date.now();
           const fullAlbum = await mbProvider.getReleaseGroup(album.id);
-          logger.info(`[TIMING] getReleaseGroup ${album.id}: ${Date.now()-t0}ms`);
-
-          t0 = Date.now();
           await this.storeReleaseGroup(album.id, fullAlbum, mbid);
-          logger.info(`[TIMING] storeReleaseGroup ${album.id}: ${Date.now()-t0}ms`);
+          logger.info(`Stored album ${album.id} (${i + 1}/${filteredAlbums.length})`);
 
-          logger.info(`Stored album ${album.id} (${i + 1}/${albums.length})`);
-
-          t0 = Date.now();
           const releases = await mbProvider.getReleasesByReleaseGroup(album.id);
-          logger.info(`[TIMING] getReleasesByReleaseGroup ${album.id} (${releases.length} releases): ${Date.now()-t0}ms`);
-
-          for (const release of releases) {
+          const filteredReleases = releases.filter(r => this.matchesStatusFilter(r));
+          for (const release of filteredReleases) {
             try {
-              t0 = Date.now();
               const fullRelease = await mbProvider.getRelease(release.id);
-              logger.info(`[TIMING] getRelease ${release.id}: ${Date.now()-t0}ms`);
-
-              t0 = Date.now();
               await this.storeRelease(release.id, fullRelease);
-              logger.info(`[TIMING] storeRelease ${release.id}: ${Date.now()-t0}ms`);
             } catch (err) {
               logger.error(`Failed to fetch release ${release.id}:`, err);
             }
@@ -942,30 +708,49 @@ class ArtistService {
         }
       }
 
+      // If this release group doesn't match the configured fetch type filter,
+      // store metadata only — no releases, no tracks fetched
+      if (!this.matchesFetchTypeFilter(releaseGroupData)) {
+        logger.info(`Album ${mbid} (${releaseGroupData.primaryType || 'Unknown'}) skipped by fetch type filter — storing metadata only`);
+        await this.storeReleaseGroup(mbid, releaseGroupData, artistId);
+        return lidarr.formatAlbum(mbid);
+      }
+
       await this.storeReleaseGroup(mbid, releaseGroupData, artistId);
 
-      // Fetch all Official releases, queue others
+      // Queue album image job — only for albums Lidarr explicitly requested
+      const backgroundJobQueue = require('./backgroundJobQueue');
+      if (backgroundJobQueue.hasAlbumImageProvider()) {
+        await backgroundJobQueue.queueJob('fetch_album_images', 'release_group', mbid, 1);
+      }
+
+      // Fetch releases matching configured status filter
+      const config = require('./config');
+      const statusFilter = config.get('metadata.fetchTypes.releaseStatuses', ['Official']);
       const releases = await mbProvider.getReleasesByReleaseGroup(mbid);
-      const officialReleases = releases.filter(r => r.status === 'Official');
-      const otherReleases = releases.filter(r => r.status !== 'Official');
+      const wantedReleases = statusFilter.length > 0
+        ? releases.filter(r => statusFilter.includes(r.status || 'Official'))
+        : releases;
+      const otherReleases = statusFilter.length > 0
+        ? releases.filter(r => !statusFilter.includes(r.status || 'Official'))
+        : [];
 
-      logger.info(`Album ${mbid}: ${officialReleases.length} Official, ${otherReleases.length} other releases`);
+      logger.info(`Album ${mbid}: ${wantedReleases.length} matching status filter, ${otherReleases.length} other releases`);
 
-      for (let i = 0; i < officialReleases.length; i++) {
-        const release = officialReleases[i];
+      for (let i = 0; i < wantedReleases.length; i++) {
+        const release = wantedReleases[i];
         try {
           const fullRelease = await mbProvider.getRelease(release.id);
           await this.storeRelease(release.id, fullRelease);
-          logger.info(`Stored Official release ${release.id} (${i + 1}/${officialReleases.length})`);
+          logger.info(`Stored release ${release.id} [${release.status}] (${i + 1}/${wantedReleases.length})`);
         } catch (err) {
           logger.error(`Failed to fetch release ${release.id}:`, err);
         }
       }
 
       if (otherReleases.length > 0) {
-        const metadataJobQueue = require('./metadataJobQueue');
-        await metadataJobQueue.queueJob('fetch_album_full', 'release_group', mbid, 3);
-        logger.info(`Queued ${otherReleases.length} non-Official releases for background fetch`);
+        await backgroundJobQueue.queueJob('fetch_album_full', 'release_group', mbid, 3);
+        logger.info(`Queued ${otherReleases.length} non-matching releases for background fetch`);
       }
 
     } else {
@@ -992,6 +777,46 @@ class ArtistService {
     }
 
     return lidarr.formatAlbum(mbid);
+  }
+
+  matchesStatusFilter(release) {
+    const config = require('./config');
+    const statusFilter = config.get('metadata.fetchTypes.releaseStatuses', ['Official']);
+    if (statusFilter.length === 0) return true;
+    const status = release.status || 'Official';
+    return statusFilter.includes(status);
+  }
+
+  matchesFetchTypeFilter(rg) {
+    const config = require('./config');
+    const albumTypes = config.get('metadata.fetchTypes.albumTypes', ['Studio']);
+    const primaryType = rg['primary-type'] || rg.primaryType || '';
+    const secondaryTypes = rg['secondary-types'] || rg.secondaryTypes || [];
+
+    // Each named type maps to exact MB conditions (same logic as Metadata Browser filter)
+    // A release group passes if it matches ANY selected type
+    return albumTypes.some(type => {
+      switch (type) {
+        case 'Studio':        return primaryType === 'Album' && secondaryTypes.length === 0;
+        case 'Live':          return secondaryTypes.includes('Live');
+        case 'Compilation':   return secondaryTypes.includes('Compilation');
+        case 'Soundtrack':    return secondaryTypes.includes('Soundtrack');
+        case 'Remix':         return secondaryTypes.includes('Remix');
+        case 'DJ-mix':        return secondaryTypes.includes('DJ-mix');
+        case 'Mixtape':       return secondaryTypes.includes('Mixtape/Street');
+        case 'Demo':          return secondaryTypes.includes('Demo');
+        case 'Spokenword':    return secondaryTypes.includes('Spokenword');
+        case 'Interview':     return secondaryTypes.includes('Interview');
+        case 'Audiobook':     return secondaryTypes.includes('Audiobook');
+        case 'Audio drama':   return secondaryTypes.includes('Audio drama');
+        case 'Field recording': return secondaryTypes.includes('Field recording');
+        case 'EP':            return primaryType === 'EP';
+        case 'Single':        return primaryType === 'Single';
+        case 'Broadcast':     return primaryType === 'Broadcast';
+        case 'Other':         return primaryType === 'Other';
+        default:              return false;
+      }
+    });
   }
 
   // Formatting removed - use lidarr.js formatArtist() instead

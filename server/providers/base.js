@@ -117,7 +117,10 @@ class BaseProvider {
         if (attempt > 1) {
           logger.info(`${this.name}: Request succeeded on attempt ${attempt}/${maxRetries} for ${cacheKey}`);
         }
-        cache.set(cacheKey, result, ttl);
+        // Don't cache empty arrays — provider may have images later
+        if (!Array.isArray(result) || result.length > 0) {
+          cache.set(cacheKey, result, ttl);
+        }
         return result;
       } catch (error) {
         lastError = error;

@@ -155,8 +155,19 @@ async function fetchArtistReleases(artistMbid, metadata) {
     // Store each release
     for (const release of releases) {
       try {
-        // First, ensure the release-group exists
+        // Filter by release group type before doing anything
         const releaseGroup = release['release-group'];
+        if (releaseGroup && !metaHandler.matchesFetchTypeFilter(releaseGroup)) {
+          logger.info(`Skipping release ${release.id} - release group type (${releaseGroup['primary-type'] || 'null'}) not in fetch filter`);
+          continue;
+        }
+
+        if (!metaHandler.matchesStatusFilter(release)) {
+          logger.info(`Skipping release ${release.id} (status: ${release.status || 'null'}) - not in status filter`);
+          continue;
+        }
+
+        // Ensure the release-group exists
         if (releaseGroup && releaseGroup.id) {
           // Check if release-group exists, if not create it
           const rgExists = await metaHandler.checkReleaseGroupExists(releaseGroup.id);
@@ -265,9 +276,13 @@ async function fetchArtistAlbums(artistMbid) {
   const albums = await mbProvider.getArtistAlbums(artistMbid);
   logger.info(`Found ${albums.length} albums for artist ${artistMbid}`);
 
+  // Apply configured fetch type filter
+  const filteredAlbums = albums.filter(a => metaHandler.matchesFetchTypeFilter(a));
+  logger.info(`Fetching ${filteredAlbums.length}/${albums.length} albums after type filter for artist ${artistMbid}`);
+
   // First pass: store each album
   const failedAlbums = [];
-  for (const album of albums) {
+  for (const album of filteredAlbums) {
     try {
       const fullAlbum = await mbProvider.getReleaseGroup(album.id);
       await metaHandler.storeReleaseGroup(album.id, fullAlbum, artistMbid);
@@ -285,7 +300,7 @@ async function fetchArtistAlbums(artistMbid) {
     }, 'album');
   }
 
-  logger.info(`Completed fetching albums for artist ${artistMbid}: ${albums.length} total, ${failedAlbums.length} initially failed`);
+  logger.info(`Completed fetching albums for artist ${artistMbid}: ${filteredAlbums.length} fetched (of ${albums.length} total), ${failedAlbums.length} initially failed`);
 }
 
 /**

@@ -6,7 +6,6 @@ async function searchArtists(query, limit = 3) {
   if (!mbProvider) throw new Error('MusicBrainz provider not available');
 
   const wikiProvider = registry.getProvider('wikipedia');
-  const tadbProvider = registry.getProvider('theaudiodb');
   const fanartProvider = registry.getProvider('fanart');
 
   const results = await mbProvider.searchArtist(query, limit);
@@ -24,15 +23,7 @@ async function searchArtists(query, limit = 3) {
       }
     }
 
-    // Images from TheAudioDB, fallback to Fanart
-    if (tadbProvider) {
-      try {
-        images = await tadbProvider.getArtistImages(result.name, result.id);
-      } catch (err) {
-        logger.warn(`TADB images failed for ${result.name}: ${err.message}`);
-      }
-    }
-    if (images.length === 0 && fanartProvider) {
+    if (fanartProvider) {
       try {
         images = await fanartProvider.getArtistImages(result.id);
       } catch (err) {
@@ -49,7 +40,6 @@ async function searchAlbums(query, limit = 3) {
   if (!mbProvider) throw new Error('MusicBrainz provider not available');
 
   const caaProvider = registry.getProvider('coverartarchive');
-  const tadbProvider = registry.getProvider('theaudiodb');
 
   const results = await mbProvider.searchAlbum(query, null, limit);
 
@@ -64,16 +54,6 @@ async function searchAlbums(query, limit = 3) {
         logger.warn(`CAA images failed for ${result.id}: ${err.message}`);
       }
     }
-    if (images.length === 0 && tadbProvider) {
-      try {
-        const artistCredit = result.artistCredit || [];
-        const artistName = artistCredit.length > 0 ? artistCredit[0].artist.name : null;
-        if (artistName) images = await tadbProvider.getAlbumImages(result.title, artistName, result.id);
-      } catch (err) {
-        logger.warn(`TADB album images failed for ${result.title}: ${err.message}`);
-      }
-    }
-
     return { ...result, images };
   }));
 }

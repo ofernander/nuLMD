@@ -3,7 +3,6 @@ const config = require('./config');
 const MusicBrainzProvider = require('../providers/musicbrainz');
 const WikipediaProvider = require('../providers/wikipedia');
 const CoverArtArchiveProvider = require('../providers/coverartarchive');
-const TheAudioDBProvider = require('../providers/theaudiodb');
 const FanartTVProvider = require('../providers/fanart');
 
 class ProviderRegistry {
@@ -28,7 +27,6 @@ class ProviderRegistry {
       musicbrainz: MusicBrainzProvider,
       wikipedia: WikipediaProvider,
       coverartarchive: CoverArtArchiveProvider,
-      theaudiodb: TheAudioDBProvider,
       fanart: FanartTVProvider
     };
 
