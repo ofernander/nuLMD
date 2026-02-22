@@ -169,6 +169,8 @@ CREATE TABLE IF NOT EXISTS images (
     provider VARCHAR(50) NOT NULL,
     last_verified_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     
+    user_uploaded BOOLEAN DEFAULT FALSE,
+    uploaded_at TIMESTAMP WITH TIME ZONE,
     CONSTRAINT unique_entity_image UNIQUE(entity_mbid, cover_type, provider)
 );
 

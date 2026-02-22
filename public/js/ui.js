@@ -1001,6 +1001,239 @@ const ui = {
         }
     },
 
+    // ─── Images Tab ──────────────────────────────────────────────────────────
+
+    async loadImagesTab() {
+        const listEl = document.getElementById('imageArtistList');
+        listEl.innerHTML = '<p style="color: var(--text-secondary); font-size: 0.875rem;">Loading...</p>';
+
+        try {
+            const response = await fetch('/api/metadata/artists');
+            this.imageArtists = await response.json();
+            this.imageArtists.sort((a, b) => a.name.localeCompare(b.name));
+            this._renderImageArtistList(this.imageArtists);
+        } catch (e) {
+            listEl.innerHTML = '<p style="color: var(--text-secondary);">Failed to load artists</p>';
+        }
+    },
+
+    _renderImageArtistList(artists) {
+        const listEl = document.getElementById('imageArtistList');
+        if (artists.length === 0) {
+            listEl.innerHTML = '<p style="color: var(--text-secondary); font-size: 0.875rem;">No artists found</p>';
+            return;
+        }
+        listEl.innerHTML = artists.map(a => `
+            <div class="log-file-entry ${this.selectedImageArtist === a.mbid ? 'active' : ''}" 
+                 onclick="ui.selectImageArtist('${a.mbid}', '${this.escapeHtml(a.name).replace(/'/g, "\\'")}')"
+                 data-name="${a.name.toLowerCase()}">
+                <div class="log-file-name">${this.escapeHtml(a.name)}</div>
+                <div class="log-file-meta">${a.type || 'Unknown'}</div>
+            </div>
+        `).join('');
+    },
+
+    filterImageArtistList() {
+        const q = document.getElementById('imageArtistSearch').value.toLowerCase();
+        const filtered = (this.imageArtists || []).filter(a => a.name.toLowerCase().includes(q));
+        this._renderImageArtistList(filtered);
+    },
+
+    async selectImageArtist(mbid, name) {
+        this.selectedImageArtist = mbid;
+        // Re-render list to update active state
+        this.filterImageArtistList();
+
+        const panel = document.getElementById('imageDetailPanel');
+        panel.innerHTML = '<div class="card"><p style="color: var(--text-secondary);">Loading...</p></div>';
+
+        try {
+            const [artistImages, albums] = await Promise.all([
+                fetch(`/api/images/artist/${mbid}`).then(r => r.json()),
+                fetch(`/api/images/artist-albums/${mbid}`).then(r => r.json())
+            ]);
+
+            let html = '';
+
+            // Artist images card
+            html += '<div class="card" style="margin-bottom: 1.5rem;">';
+            html += `<div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem;">`;
+            html += `<h2>${this.escapeHtml(name)} — Artist Images</h2>`;
+            html += `<button class="btn btn-secondary" onclick="ui.showUploadForm('artist', '${mbid}', null)">Upload Image</button>`;
+            html += '</div>';
+            html += this._renderImageGrid(artistImages, 'artist');
+            html += '</div>';
+
+            // Albums
+            if (albums.length > 0) {
+                html += '<div class="card">';
+                html += '<h2>Album Images</h2>';
+                html += '<div id="imageAlbumList">';
+                for (const album of albums) {
+                    const year = album.first_release_date ? album.first_release_date.substring(0, 4) : '?';
+                    html += `
+                        <div style="border-bottom: 1px solid var(--border); padding: 1rem 0;">
+                            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.75rem;">
+                                <div>
+                                    <strong>${this.escapeHtml(album.title)}</strong>
+                                    <span style="color: var(--text-secondary); font-size: 0.85rem; margin-left: 0.5rem;">${year} &middot; ${album.primary_type || ''}</span>
+                                </div>
+                                <button class="btn btn-secondary" style="font-size: 0.8rem; padding: 0.3rem 0.75rem;" onclick="ui.showUploadForm('album', '${album.mbid}', '${album.mbid}')">Upload Image</button>
+                            </div>
+                            <div id="album-images-${album.mbid}">
+                                <p style="color: var(--text-secondary); font-size: 0.85rem;">Loading...</p>
+                            </div>
+                        </div>
+                    `;
+                }
+                html += '</div></div>';
+            }
+
+            panel.innerHTML = html;
+
+            // Load album images async
+            for (const album of albums) {
+                fetch(`/api/images/album/${album.mbid}`)
+                    .then(r => r.json())
+                    .then(images => {
+                        const el = document.getElementById(`album-images-${album.mbid}`);
+                        if (el) el.innerHTML = this._renderImageGrid(images, 'album');
+                    })
+                    .catch(() => {});
+            }
+
+        } catch (e) {
+            panel.innerHTML = '<div class="card"><p style="color: var(--text-secondary);">Failed to load images</p></div>';
+        }
+    },
+
+    _renderImageGrid(images, entityKind) {
+        if (images.length === 0) {
+            return '<p style="color: var(--text-secondary); font-size: 0.875rem;">No images cached</p>';
+        }
+        return '<div style="display: flex; flex-wrap: wrap; gap: 1rem;">' +
+            images.map(img => {
+                const srcPath = img.local_path
+                    ? `/api/images/${img.entity_type}/${img.entity_mbid}/${img.local_path.split('/').pop()}`
+                    : img.url;
+                const sourceBadgeColor = img.user_uploaded ? '#00A65B' : 'var(--text-secondary)';
+                const sourceLabel = img.user_uploaded ? 'manual' : img.provider;
+                return `
+                    <div style="width: 160px;">
+                        <div style="width: 160px; height: 160px; background: var(--bg-tertiary); border-radius: 0.375rem; overflow: hidden; display: flex; align-items: center; justify-content: center; margin-bottom: 0.5rem;">
+                            ${img.cached
+                                ? `<img src="${srcPath}" style="max-width: 100%; max-height: 100%; object-fit: contain;" onerror="this.parentElement.innerHTML='<span style=color:var(--text-secondary);font-size:0.75rem>Failed to load</span>'">`
+                                : `<span style="color: var(--text-secondary); font-size: 0.75rem; text-align: center; padding: 0.5rem;">${img.cache_failed ? 'Unavailable' : 'Not cached'}</span>`
+                            }
+                        </div>
+                        <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 0.25rem;">
+                            <div>
+                                <div style="font-size: 0.8rem; font-weight: 600;">${img.cover_type}</div>
+                                <div style="font-size: 0.75rem; color: ${sourceBadgeColor};">${sourceLabel}</div>
+                            </div>
+                            <button class="btn-refresh" style="font-size: 0.7rem; padding: 0.2rem 0.5rem; flex-shrink: 0;" onclick="ui.deleteImage(${img.id}, '${img.entity_type}', '${img.entity_mbid}')">Delete</button>
+                        </div>
+                    </div>
+                `;
+            }).join('') + '</div>';
+    },
+
+    showUploadForm(entityKind, mbid, albumMbid) {
+        const allowedTypes = entityKind === 'artist'
+            ? ['Poster', 'Banner', 'Fanart', 'Logo', 'Clearart', 'Thumb']
+            : ['Cover', 'Disc', 'Clearart'];
+
+        const existingModal = document.getElementById('imageUploadModal');
+        if (existingModal) existingModal.remove();
+
+        const modal = document.createElement('div');
+        modal.id = 'imageUploadModal';
+        modal.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);z-index:1000;display:flex;align-items:center;justify-content:center;';
+        modal.innerHTML = `
+            <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:0.5rem;padding:1.5rem;width:400px;">
+                <h3 style="margin-bottom:1rem;">Upload ${entityKind === 'artist' ? 'Artist' : 'Album'} Image</h3>
+                <div class="form-group">
+                    <label>Image Type</label>
+                    <select id="uploadImageType" class="form-control">
+                        ${allowedTypes.map(t => `<option value="${t}">${t}</option>`).join('')}
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Image File (JPEG, PNG, WebP, GIF — max 20MB)</label>
+                    <input type="file" id="uploadImageFile" accept="image/jpeg,image/png,image/webp,image/gif" class="form-control">
+                </div>
+                <div style="display:flex;gap:0.75rem;margin-top:1rem;">
+                    <button class="btn btn-primary" onclick="ui.submitImageUpload('${entityKind}', '${mbid}')">Upload</button>
+                    <button class="btn btn-secondary" onclick="document.getElementById('imageUploadModal').remove()">Cancel</button>
+                </div>
+                <p id="uploadStatus" style="margin-top:0.75rem;font-size:0.85rem;"></p>
+            </div>
+        `;
+        document.body.appendChild(modal);
+    },
+
+    async submitImageUpload(entityKind, mbid) {
+        const typeEl = document.getElementById('uploadImageType');
+        const fileEl = document.getElementById('uploadImageFile');
+        const statusEl = document.getElementById('uploadStatus');
+
+        if (!fileEl.files[0]) {
+            statusEl.textContent = 'Select a file first.';
+            return;
+        }
+
+        const formData = new FormData();
+        formData.append('file', fileEl.files[0]);
+        formData.append('type', typeEl.value);
+
+        statusEl.textContent = 'Uploading...';
+
+        try {
+            const endpoint = entityKind === 'artist'
+                ? `/api/images/artist/${mbid}/upload`
+                : `/api/images/album/${mbid}/upload`;
+
+            const response = await fetch(endpoint, { method: 'POST', body: formData });
+            if (!response.ok) {
+                const err = await response.json();
+                throw new Error(err.error || 'Upload failed');
+            }
+
+            document.getElementById('imageUploadModal').remove();
+            this.showSuccess('Image uploaded');
+
+            // Refresh the artist panel
+            if (this.selectedImageArtist) {
+                const artistEl = document.querySelector(`[data-name] .log-file-name`);
+                const name = document.querySelector(`#imageArtistList .active .log-file-name`)?.textContent || '';
+                this.selectImageArtist(this.selectedImageArtist, name);
+            }
+        } catch (e) {
+            statusEl.textContent = `Error: ${e.message}`;
+        }
+    },
+
+    async deleteImage(imageId, entityType, entityMbid) {
+        if (!confirm('Delete this image? This cannot be undone.')) return;
+
+        try {
+            const response = await fetch(`/api/images/${imageId}`, { method: 'DELETE' });
+            if (!response.ok) throw new Error('Delete failed');
+
+            this.showSuccess('Image deleted');
+
+            // Refresh panel
+            if (this.selectedImageArtist) {
+                const name = document.querySelector('#imageArtistList .active .log-file-name')?.textContent || '';
+                this.selectImageArtist(this.selectedImageArtist, name);
+            }
+        } catch (e) {
+            this.showError('Failed to delete image');
+        }
+    },
+
+    // ─── Logs Tab ────────────────────────────────────────────────────────────────
+
     async loadLogsTab() {
         await this.loadLogFileList();
         // Auto-select most recent file (first in list, sorted by modified desc)
@@ -1129,6 +1362,18 @@ const ui = {
             }).join('');
         } catch (error) {
             console.error('Failed to refresh job queue:', error);
+        }
+    },
+
+    async clearJobQueue() {
+        if (!confirm('Clear all pending jobs from the queue?')) return;
+        try {
+            const response = await fetch('/api/jobs/clear', { method: 'POST' });
+            const data = await response.json();
+            this.showSuccess(`Cleared ${data.cleared} pending jobs`);
+            await this.refreshJobsCard();
+        } catch (e) {
+            this.showError('Failed to clear queue');
         }
     },
 

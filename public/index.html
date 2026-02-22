@@ -27,6 +27,7 @@
             <button class="tab active" data-tab="dashboard">Dashboard</button>
             <button class="tab" data-tab="browser">Metadata Browser</button>
             <button class="tab" data-tab="testing">Search Metadata</button>
+            <button class="tab" data-tab="images">Images</button>
             <button class="tab" data-tab="sources">Metadata Sources</button>
             <button class="tab" data-tab="logs">Logs</button>
         </nav>
@@ -144,12 +145,32 @@
                 </div>
             </section>
 
+            <!-- Images Tab -->
+            <section id="images-tab" class="tab-content">
+                <div style="display: grid; grid-template-columns: 280px 1fr; gap: 1.5rem; align-items: start;">
+                    <div class="card" style="position: sticky; top: 1rem;">
+                        <h2>Artists</h2>
+                        <input type="text" id="imageArtistSearch" placeholder="Search artists..." oninput="ui.filterImageArtistList()" style="width: 100%; padding: 0.5rem; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 0.375rem; color: var(--text); margin-bottom: 0.75rem;">
+                        <div id="imageArtistList" style="max-height: 70vh; overflow-y: auto;"></div>
+                    </div>
+                    <div id="imageDetailPanel">
+                        <div class="card"><p style="color: var(--text-secondary);">Select an artist to view images</p></div>
+                    </div>
+                </div>
+            </section>
+
             <!-- Logs Tab -->
             <section id="logs-tab" class="tab-content">
                 <div style="display: grid; grid-template-columns: 260px 1fr; gap: 1.5rem; align-items: start;">
-                    <div class="card" style="position: sticky; top: 1rem;">
-                        <h2>Log Files</h2>
-                        <div id="logFileList"><p style="color: var(--text-secondary); font-size: 0.875rem;">Loading...</p></div>
+                    <div style="position: sticky; top: 1rem; display: flex; flex-direction: column; gap: 1rem;">
+                        <div class="card">
+                            <h2>Log Files</h2>
+                            <div id="logFileList"><p style="color: var(--text-secondary); font-size: 0.875rem;">Loading...</p></div>
+                        </div>
+                        <div class="card">
+                            <h2>Queue</h2>
+                            <button class="btn btn-secondary" style="width:100%;" onclick="ui.clearJobQueue()">Clear Pending Jobs</button>
+                        </div>
                     </div>
 
                     <div class="card">
@@ -167,7 +188,7 @@
         </footer>
     </div>
 
-    <script src="/js/main.js?v=19"></script>
-    <script src="/js/ui.js?v=19"></script>
+    <script src="/js/main.js?v=23"></script>
+    <script src="/js/ui.js?v=23"></script>
 </body>
 </html>
