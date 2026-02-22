@@ -59,7 +59,20 @@ class Database {
       await this.runMigrations();
     } else {
       logger.info('Schema already exists');
+      await this.runColumnMigrations();
     }
+  }
+
+  async runColumnMigrations() {
+    logger.info('Checking column migrations...');
+    
+    await this.query(`
+      ALTER TABLE images 
+      ADD COLUMN IF NOT EXISTS user_uploaded BOOLEAN DEFAULT FALSE,
+      ADD COLUMN IF NOT EXISTS uploaded_at TIMESTAMP WITH TIME ZONE;
+    `);
+    
+    logger.info('Column migrations complete');
   }
 
   async runMigrations() {
@@ -298,6 +311,28 @@ class Database {
       GROUP BY rg.mbid, rg.title, rg.primary_type, rg.first_release_date, rg.last_updated_at
       ORDER BY rg.first_release_date DESC NULLS LAST
     `, [mbid]);
+    return result.rows;
+  }
+  async getImagesForEntity(entityType, entityMbid) {
+    const result = await this.query(`
+      SELECT id, entity_type, entity_mbid, cover_type, provider,
+             url, local_path, cached, user_uploaded, uploaded_at,
+             cache_failed, file_size_bytes, width, height
+      FROM images
+      WHERE entity_type = $1 AND entity_mbid = $2
+      ORDER BY user_uploaded DESC, cover_type ASC
+    `, [entityType, entityMbid]);
+    return result.rows;
+  }
+
+  async getArtistAlbumsBasic(artistMbid) {
+    const result = await this.query(`
+      SELECT rg.mbid, rg.title, rg.primary_type, rg.first_release_date
+      FROM release_groups rg
+      JOIN artist_release_groups arg ON arg.release_group_mbid = rg.mbid
+      WHERE arg.artist_mbid = $1
+      ORDER BY rg.first_release_date ASC NULLS LAST
+    `, [artistMbid]);
     return result.rows;
   }
 }

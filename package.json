@@ -36,7 +36,8 @@
     "js-yaml": "^4.1.0",
     "pg": "^8.11.3",
     "node-cron": "^3.0.3",
-    "winston-daily-rotate-file": "^5.0.0"
+    "winston-daily-rotate-file": "^5.0.0",
+    "multer": "^1.4.5-lts.1"
   },
   "devDependencies": {
     "nodemon": "^3.0.2",

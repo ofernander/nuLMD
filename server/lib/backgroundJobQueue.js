@@ -303,15 +303,28 @@ class BackgroundJobQueue {
   }
 
   async _storeImageUrls(entityType, entityMbid, images, provider) {
+    // Get all user-uploaded cover types for this entity so we don't overwrite them
+    const userUploaded = await database.query(`
+      SELECT cover_type FROM images
+      WHERE entity_type = $1 AND entity_mbid = $2 AND user_uploaded = true
+    `, [entityType, entityMbid]);
+    const protectedTypes = new Set(userUploaded.rows.map(r => r.cover_type));
+
+    let stored = 0;
     for (const image of images) {
+      if (protectedTypes.has(image.CoverType)) {
+        logger.info(`Image: Skipping ${image.CoverType} for ${entityType} ${entityMbid} — user upload takes precedence`);
+        continue;
+      }
       await database.query(`
         INSERT INTO images (entity_type, entity_mbid, url, cover_type, provider, last_verified_at)
         VALUES ($1, $2, $3, $4, $5, NOW())
         ON CONFLICT (entity_mbid, cover_type, provider) DO UPDATE
           SET url = EXCLUDED.url, last_verified_at = NOW(), cached = false, cache_failed = false
       `, [entityType, entityMbid, image.Url, image.CoverType, image.Provider || provider]);
+      stored++;
     }
-    logger.info(`Image: Stored ${images.length} URLs for ${entityType} ${entityMbid} from ${provider}`);
+    logger.info(`Image: Stored ${stored}/${images.length} URLs for ${entityType} ${entityMbid} from ${provider}`);
   }
 
   async _fetchArtistImages(mbid) {

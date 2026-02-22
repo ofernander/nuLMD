@@ -125,6 +125,8 @@ document.addEventListener('DOMContentLoaded', async () => {
                 ui.refreshDashboardStats();
             } else if (tabName === 'logs') {
                 ui.loadLogsTab();
+            } else if (tabName === 'images') {
+                ui.loadImagesTab();
             }
         });
     });

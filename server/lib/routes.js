@@ -8,6 +8,16 @@ const metaHandler = require('./metaHandler');
 const lidarr = require('./lidarr');
 const backgroundJobQueue = require('./backgroundJobQueue');
 const database = require('../sql/database');
+const multer = require('multer');
+const fs = require('fs').promises;
+const path = require('path');
+
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
+
+const ARTIST_IMAGE_TYPES = ['Poster', 'Banner', 'Fanart', 'Logo', 'Clearart', 'Thumb'];
+const ALBUM_IMAGE_TYPES  = ['Cover', 'Disc', 'Clearart'];
+const MIME_TO_EXT = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif' };
+const IMAGES_BASE = path.join(__dirname, '../../data/images');
 
 // API version
 router.get('/version', (req, res) => {
@@ -26,6 +36,16 @@ router.get('/jobs/stats', async (req, res, next) => {
   } catch (error) {
     next(error);
   }
+});
+
+router.post('/jobs/clear', async (req, res, next) => {
+  try {
+    const result = await database.query(
+      `DELETE FROM metadata_jobs WHERE status = 'pending' RETURNING id`
+    );
+    logger.info(`Cleared ${result.rows.length} pending jobs from queue`);
+    res.json({ success: true, cleared: result.rows.length });
+  } catch (error) { next(error); }
 });
 
 // System stats
@@ -212,45 +232,6 @@ router.get('/album/:provider/:id/tracks', async (req, res, next) => {
   }
 });
 
-// Image serving endpoint
-router.get('/images/:entity_type/:mbid/:filename', async (req, res, next) => {
-  try {
-    const { entity_type, mbid, filename } = req.params;
-    const path = require('path');
-    const fs = require('fs').promises;
-    
-    // Construct the file path
-    const imagePath = path.join(__dirname, '../../data/images', entity_type, mbid, filename);
-    
-    // Check if file exists
-    try {
-      await fs.access(imagePath);
-    } catch (error) {
-      return res.status(404).json({ error: 'Image not found' });
-    }
-    
-    // Determine content type from extension
-    const ext = path.extname(filename).toLowerCase();
-    const contentTypes = {
-      '.jpg': 'image/jpeg',
-      '.jpeg': 'image/jpeg',
-      '.png': 'image/png',
-      '.gif': 'image/gif',
-      '.webp': 'image/webp'
-    };
-    
-    const contentType = contentTypes[ext] || 'application/octet-stream';
-    
-    // Send the file
-    res.setHeader('Content-Type', contentType);
-    res.setHeader('Cache-Control', 'public, max-age=31536000'); // Cache for 1 year
-    res.sendFile(imagePath);
-    
-  } catch (error) {
-    next(error);
-  }
-});
-
 // Configuration endpoints
 router.get('/config', (req, res) => {
   const cfg = config.getAll();
@@ -428,6 +409,146 @@ router.get('/metadata/album-tracks/:mbid', async (req, res, next) => {
     res.json({
       tracks: result.rows
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Image browser endpoints
+router.get('/images/artist/:mbid', async (req, res, next) => {
+  try {
+    const images = await database.getImagesForEntity('artist', req.params.mbid);
+    res.json(images);
+  } catch (error) { next(error); }
+});
+
+router.get('/images/album/:mbid', async (req, res, next) => {
+  try {
+    const images = await database.getImagesForEntity('release_group', req.params.mbid);
+    res.json(images);
+  } catch (error) { next(error); }
+});
+
+router.get('/images/artist-albums/:mbid', async (req, res, next) => {
+  try {
+    const albums = await database.getArtistAlbumsBasic(req.params.mbid);
+    res.json(albums);
+  } catch (error) { next(error); }
+});
+
+// Image upload endpoints
+async function handleImageUpload(req, res, next, entityType, allowedTypes) {
+  try {
+    const { mbid } = req.params;
+    const { type } = req.body;
+
+    if (!type || !allowedTypes.includes(type)) {
+      return res.status(400).json({ error: `Invalid type. Allowed: ${allowedTypes.join(', ')}` });
+    }
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    const ext = MIME_TO_EXT[req.file.mimetype];
+    if (!ext) {
+      return res.status(400).json({ error: 'Unsupported image format. Use JPEG, PNG, WebP, or GIF.' });
+    }
+
+    // Write file to disk
+    const dirPath = path.join(IMAGES_BASE, entityType, mbid);
+    await fs.mkdir(dirPath, { recursive: true });
+    const filename = `${type.toLowerCase()}.${ext}`;
+    const filePath = path.join(dirPath, filename);
+    await fs.writeFile(filePath, req.file.buffer);
+
+    // Remove any auto-fetched rows for this cover_type so they don't compete with the upload
+    await database.query(`
+      DELETE FROM images
+      WHERE entity_type = $1 AND entity_mbid = $2 AND cover_type = $3 AND (user_uploaded = false OR user_uploaded IS NULL)
+    `, [entityType, mbid, type]);
+
+    // Upsert DB record — user upload always wins, overwrites existing manual entry of same type
+    const result = await database.query(`
+      INSERT INTO images
+        (entity_type, entity_mbid, cover_type, provider, url, local_path, cached, user_uploaded, uploaded_at)
+      VALUES ($1, $2, $3, 'manual', $4, $5, true, true, NOW())
+      ON CONFLICT (entity_mbid, cover_type, provider)
+      DO UPDATE SET
+        local_path   = EXCLUDED.local_path,
+        url          = EXCLUDED.url,
+        cached       = true,
+        user_uploaded = true,
+        uploaded_at  = NOW(),
+        cache_failed = false
+      RETURNING *
+    `, [entityType, mbid, type, `/api/images/${entityType}/${mbid}/${filename}`, filePath]);
+
+    logger.info(`User uploaded ${type} image for ${entityType} ${mbid}: ${filePath}`);
+    res.json(result.rows[0]);
+  } catch (error) {
+    next(error);
+  }
+}
+
+router.post('/images/artist/:mbid/upload', upload.single('file'), (req, res, next) => {
+  handleImageUpload(req, res, next, 'artist', ARTIST_IMAGE_TYPES);
+});
+
+router.post('/images/album/:mbid/upload', upload.single('file'), (req, res, next) => {
+  handleImageUpload(req, res, next, 'release_group', ALBUM_IMAGE_TYPES);
+});
+
+// Image delete endpoint
+router.delete('/images/:id', async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    const result = await database.query('SELECT * FROM images WHERE id = $1', [id]);
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Image not found' });
+    }
+
+    const image = result.rows[0];
+
+    // Delete file from disk if it exists
+    if (image.local_path) {
+      try {
+        await fs.unlink(image.local_path);
+        logger.info(`Deleted image file: ${image.local_path}`);
+      } catch (err) {
+        if (err.code !== 'ENOENT') {
+          logger.warn(`Could not delete image file ${image.local_path}: ${err.message}`);
+        }
+      }
+    }
+
+    // Remove DB record
+    await database.query('DELETE FROM images WHERE id = $1', [id]);
+
+    logger.info(`Deleted image record ${id} (${image.entity_type} ${image.entity_mbid} ${image.cover_type})`);
+    res.json({ success: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Image file serving — must come AFTER specific /images/* routes to avoid route conflict
+// Regex ensures :filename must contain a dot (actual file extension) e.g. cover.jpg
+router.get('/images/:entity_type/:mbid/:filename([^/]+[.][^/]+)', async (req, res, next) => {
+  try {
+    const { entity_type, mbid, filename } = req.params;
+    const imagePath = path.join(__dirname, '../../data/images', entity_type, mbid, filename);
+    try {
+      await fs.access(imagePath);
+    } catch (error) {
+      return res.status(404).json({ error: 'Image not found' });
+    }
+    const ext = path.extname(filename).toLowerCase();
+    const contentTypes = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif', '.webp': 'image/webp' };
+    const contentType = contentTypes[ext] || 'application/octet-stream';
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Cache-Control', 'public, max-age=31536000');
+    res.sendFile(imagePath);
   } catch (error) {
     next(error);
   }
