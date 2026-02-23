@@ -606,7 +606,7 @@ class ArtistService {
   
   /**
    * Single entry point for artist metadata.
-   * Ensures artist + albums + first Official release per album are in DB.
+   * Ensures artist + release groups only. Releases handled by ensureAlbum when Lidarr requests each album.
    * Called by both Lidarr endpoint and UI fetch button.
    */
   async ensureArtist(mbid) {
@@ -623,20 +623,7 @@ class ArtistService {
       await this.refreshArtist(mbid);
     }
 
-    // Ensure artist overview populated once before album loop
-    // Previously this check ran inside storeReleaseGroup on every album = N MB requests
-    artist = await database.getArtist(mbid);
-    if (artist && (!artist.overview || artist.overview === '')) {
-      logger.info(`Artist ${mbid} missing overview, fetching once before album loop`);
-      try {
-        const fullArtistData = await mbProvider.getArtist(mbid);
-        await this.storeArtist(mbid, fullArtistData, true);
-      } catch (error) {
-        logger.error(`Failed to fetch artist overview for ${mbid}:`, error.message);
-      }
-    }
-
-    // Fetch albums if none exist
+    // Fetch release groups if none exist
     const existingAlbums = await database.query(
       'SELECT mbid FROM release_groups rg JOIN artist_release_groups arg ON arg.release_group_mbid = rg.mbid WHERE arg.artist_mbid = $1',
       [mbid]
@@ -655,18 +642,7 @@ class ArtistService {
         try {
           const fullAlbum = await mbProvider.getReleaseGroup(album.id);
           await this.storeReleaseGroup(album.id, fullAlbum, mbid);
-          logger.info(`Stored album ${album.id} (${i + 1}/${filteredAlbums.length})`);
-
-          const releases = await mbProvider.getReleasesByReleaseGroup(album.id);
-          const filteredReleases = releases.filter(r => this.matchesStatusFilter(r));
-          for (const release of filteredReleases) {
-            try {
-              const fullRelease = await mbProvider.getRelease(release.id);
-              await this.storeRelease(release.id, fullRelease);
-            } catch (err) {
-              logger.error(`Failed to fetch release ${release.id}:`, err);
-            }
-          }
+          logger.info(`Stored release group ${album.id} (${i + 1}/${filteredAlbums.length})`);
         } catch (err) {
           logger.error(`Failed to fetch album ${album.id}:`, err);
         }
@@ -724,34 +700,27 @@ class ArtistService {
         await backgroundJobQueue.queueJob('fetch_album_images', 'release_group', mbid, 1);
       }
 
-      // Fetch releases matching configured status filter
-      const config = require('./config');
-      const statusFilter = config.get('metadata.fetchTypes.releaseStatuses', ['Official']);
+      // Fetch first 3 Official releases — enough for Lidarr to import
+      // Queue full fetch in background for remaining releases
       const releases = await mbProvider.getReleasesByReleaseGroup(mbid);
-      const wantedReleases = statusFilter.length > 0
-        ? releases.filter(r => statusFilter.includes(r.status || 'Official'))
-        : releases;
-      const otherReleases = statusFilter.length > 0
-        ? releases.filter(r => !statusFilter.includes(r.status || 'Official'))
-        : [];
+      const officialReleases = releases.filter(r => r.status === 'Official');
+      const topReleases = (officialReleases.length > 0 ? officialReleases : releases).slice(0, 3);
 
-      logger.info(`Album ${mbid}: ${wantedReleases.length} matching status filter, ${otherReleases.length} other releases`);
+      logger.info(`Album ${mbid}: fetching ${topReleases.length} of ${releases.length} releases synchronously`);
 
-      for (let i = 0; i < wantedReleases.length; i++) {
-        const release = wantedReleases[i];
+      for (const release of topReleases) {
         try {
           const fullRelease = await mbProvider.getRelease(release.id);
           await this.storeRelease(release.id, fullRelease);
-          logger.info(`Stored release ${release.id} [${release.status}] (${i + 1}/${wantedReleases.length})`);
+          logger.info(`Stored release ${release.id} for album ${mbid}`);
         } catch (err) {
           logger.error(`Failed to fetch release ${release.id}:`, err);
         }
       }
 
-      if (otherReleases.length > 0) {
-        await backgroundJobQueue.queueJob('fetch_album_full', 'release_group', mbid, 3);
-        logger.info(`Queued ${otherReleases.length} non-matching releases for background fetch`);
-      }
+      // Queue remaining releases for background fetch — priority 1 (lowest) so Lidarr requests are never blocked
+      await backgroundJobQueue.queueJob('fetch_album_full', 'release_group', mbid, 1);
+      logger.info(`Queued full release fetch for album ${mbid}`);
 
     } else {
       // Album exists - check releases
