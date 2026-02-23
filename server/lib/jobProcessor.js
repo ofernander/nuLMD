@@ -315,61 +315,38 @@ async function fetchReleaseFull(releaseMbid, metadata) {
 }
 
 /**
- * Fetch complete album data: release group + ALL releases + track artists
+ * Fetch complete album data: release group + remaining releases
+ * Does NOT store track artists or the primary album artist — those are handled elsewhere
  */
 async function fetchAlbumFull(releaseGroupMbid) {
   const mbProvider = registry.getProvider('musicbrainz');
-  const database = require('../sql/database');
-  
+  const config = require('./config');
+
   logger.info(`Fetching complete album data for ${releaseGroupMbid}`);
-  
+
   // Fetch release group
   const releaseGroupData = await mbProvider.getReleaseGroup(releaseGroupMbid);
-  
-  // Extract and store artist if needed
-  let artistId = null;
-  if (releaseGroupData['artist-credit'] && releaseGroupData['artist-credit'].length > 0) {
-    artistId = releaseGroupData['artist-credit'][0].artist.id;
-    const artistExists = await database.getArtist(artistId);
-    if (!artistExists) {
-      logger.info(`Fetching missing artist ${artistId}`);
-      const artistData = await mbProvider.getArtist(artistId);
-      await metaHandler.storeArtist(artistId, artistData, false);
-    }
-  }
-  
-  // Store release group
-  await metaHandler.storeReleaseGroup(releaseGroupMbid, releaseGroupData, artistId);
-  
-  // Fetch only non-Official releases (Official already fetched synchronously)
-  const allReleases = releaseGroupData.releases || [];
-  const nonOfficialReleases = allReleases.filter(r => r.status !== 'Official');
-  
-  logger.info(`Fetching ${nonOfficialReleases.length} non-Official releases for album ${releaseGroupMbid}`);
 
-  const trackArtistIds = new Set();
+  // Store release group (artist already in DB from synchronous path)
+  await metaHandler.storeReleaseGroup(releaseGroupMbid, releaseGroupData, null);
+
+  // Fetch remaining releases — skip Official (already fetched synchronously), apply status filter
+  const allReleases = releaseGroupData.releases || [];
+  const statusFilter = config.get('metadata.fetchTypes.releaseStatuses', ['Official']);
+  const remainingReleases = allReleases.filter(r => {
+    const alreadyFetched = r.status === 'Official';
+    const matchesFilter = statusFilter.length === 0 || statusFilter.includes(r.status || 'Official');
+    return !alreadyFetched && matchesFilter;
+  });
+
+  logger.info(`Fetching ${remainingReleases.length} remaining releases for album ${releaseGroupMbid}`);
+
   const failedReleases = [];
 
-  // Helper to collect track artists from a fetched release
-  function collectTrackArtists(fullRelease) {
-    const media = fullRelease.media || [];
-    media.forEach(medium => {
-      const tracks = medium.tracks || [];
-      tracks.forEach(track => {
-        const artistCredit = track['artist-credit'] || [];
-        if (artistCredit.length > 0) {
-          trackArtistIds.add(artistCredit[0].artist.id);
-        }
-      });
-    });
-  }
-
-  // First pass: fetch non-Official releases
-  for (const release of nonOfficialReleases) {
+  for (const release of remainingReleases) {
     try {
       const fullRelease = await mbProvider.getRelease(release.id);
       await metaHandler.storeRelease(release.id, fullRelease);
-      collectTrackArtists(fullRelease);
       logger.info(`Stored ${release.status || 'Other'} release ${release.id}`);
     } catch (error) {
       logger.warn(`Failed to fetch ${release.status || 'Other'} release ${release.id} (will retry): ${error.message}`);
@@ -377,46 +354,14 @@ async function fetchAlbumFull(releaseGroupMbid) {
     }
   }
 
-  // Retry failed releases
   if (failedReleases.length > 0) {
     await retryFailed(failedReleases, async (release) => {
       const fullRelease = await mbProvider.getRelease(release.id);
       await metaHandler.storeRelease(release.id, fullRelease);
-      collectTrackArtists(fullRelease);
     }, 'release');
   }
 
-  // Fetch any missing track artists
-  const missingArtistIds = [];
-  for (const trackArtistId of trackArtistIds) {
-    const exists = await database.getArtist(trackArtistId);
-    if (!exists) {
-      missingArtistIds.push(trackArtistId);
-    }
-  }
-
-  logger.info(`Found ${trackArtistIds.size} unique track artists, ${missingArtistIds.length} missing from DB`);
-
-  const failedArtists = [];
-  for (const trackArtistId of missingArtistIds) {
-    try {
-      const artistData = await mbProvider.getArtist(trackArtistId);
-      await metaHandler.storeArtist(trackArtistId, artistData, false);
-    } catch (error) {
-      logger.warn(`Failed to fetch track artist ${trackArtistId} (will retry): ${error.message}`);
-      failedArtists.push(trackArtistId);
-    }
-  }
-
-  // Retry failed track artists
-  if (failedArtists.length > 0) {
-    await retryFailed(failedArtists, async (trackArtistId) => {
-      const artistData = await mbProvider.getArtist(trackArtistId);
-      await metaHandler.storeArtist(trackArtistId, artistData, false);
-    }, 'track-artist');
-  }
-
-  logger.info(`Completed fetching album ${releaseGroupMbid} with ${nonOfficialReleases.length} releases and ${trackArtistIds.size} track artists`);
+  logger.info(`Completed fetching remaining releases for album ${releaseGroupMbid}`);
 }
 
 module.exports = { processJob };

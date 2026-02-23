@@ -182,8 +182,8 @@ class LidarrFormatter {
       }
     }
 
-    // Get releases (will populate artistMap with track artists)
-    const releases = await this.getReleasesForAlbum(mbid, artistMap);
+    // Get releases — only primary release group artists in artists array, matching old LMD behaviour
+    const releases = await this.getReleasesForAlbum(mbid, null);
 
     // Convert artistMap to array
     const artists = Array.from(artistMap.values());
@@ -412,32 +412,6 @@ class LidarrFormatter {
       const title = track.title || recording.title || '';
       const duration = track.length || recording.length || 0;
       const recordingId = recording.id || '';
-
-      // Collect artist info for album-level artists array
-      // NOTE: This runs synchronously per track, so we can't await here
-      // Track artists will be queued as background jobs instead
-      if (artistMap && artistCredit.length > 0) {
-        const artist = artistCredit[0].artist;
-        if (artist && artist.id && !artistMap.has(artist.id)) {
-          // Add minimal data - must match lowercase format for albums
-          // Background job will fetch full artist later
-          artistMap.set(artist.id, {
-            artistaliases: [],
-            artistname: artist.name,
-            disambiguation: artist.disambiguation || '',
-            genres: [],
-            id: artist.id,
-            images: [],
-            links: [],
-            oldids: [],
-            overview: '',
-            rating: { Count: 0, Value: null },
-            sortname: artist.sort_name || '',
-            status: 'active',
-            type: null
-          });
-        }
-      }
 
       // Return with LOWERCASE fields (old LMD format)
       return {
