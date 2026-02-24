@@ -72,6 +72,8 @@ const ui = {
             ]);
 
             document.getElementById('dashboardVersion').textContent = version.version || '-';
+            const footerVersion = document.getElementById('footerVersion');
+            if (footerVersion) footerVersion.textContent = `v${version.version}` || 'v?';
             document.getElementById('dashboardUptime').textContent = stats.uptime || '-';
             
             const dbStatus = document.getElementById('dashboardDbStatus');
@@ -1059,7 +1061,10 @@ const ui = {
             html += '<div class="card" style="margin-bottom: 1.5rem;">';
             html += `<div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem;">`;
             html += `<h2>${this.escapeHtml(name)} — Artist Images</h2>`;
+            html += `<div style="display: flex; gap: 0.5rem;">`;
+            html += `<button class="btn btn-secondary" onclick="ui.refreshArtistImages('${mbid}')">Fetch Images</button>`;
             html += `<button class="btn btn-secondary" onclick="ui.showUploadForm('artist', '${mbid}', null)">Upload Image</button>`;
+            html += `</div>`;
             html += '</div>';
             html += this._renderImageGrid(artistImages, 'artist');
             html += '</div>';
@@ -1067,7 +1072,10 @@ const ui = {
             // Albums
             if (albums.length > 0) {
                 html += '<div class="card">';
-                html += '<h2>Album Images</h2>';
+                html += `<div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem;">`;
+                html += `<h2 style="margin: 0;">Album Images</h2>`;
+                html += `<button class="btn btn-secondary" onclick="ui.fetchAllAlbumImages('${mbid}')">Fetch All Album Images</button>`;
+                html += `</div>`;
                 html += '<div id="imageAlbumList">';
                 for (const album of albums) {
                     const year = album.first_release_date ? album.first_release_date.substring(0, 4) : '?';
@@ -1078,7 +1086,10 @@ const ui = {
                                     <strong>${this.escapeHtml(album.title)}</strong>
                                     <span style="color: var(--text-secondary); font-size: 0.85rem; margin-left: 0.5rem;">${year} &middot; ${album.primary_type || ''}</span>
                                 </div>
+                                <div style="display: flex; gap: 0.5rem;">
+                                <button class="btn btn-secondary" style="font-size: 0.8rem; padding: 0.3rem 0.75rem;" onclick="ui.refreshAlbumImages('${album.mbid}')">Fetch Image</button>
                                 <button class="btn btn-secondary" style="font-size: 0.8rem; padding: 0.3rem 0.75rem;" onclick="ui.showUploadForm('album', '${album.mbid}', '${album.mbid}')">Upload Image</button>
+                                </div>
                             </div>
                             <div id="album-images-${album.mbid}">
                                 <p style="color: var(--text-secondary); font-size: 0.85rem;">Loading...</p>
@@ -1374,6 +1385,60 @@ const ui = {
             await this.refreshJobsCard();
         } catch (e) {
             this.showError('Failed to clear queue');
+        }
+    },
+
+    async killActiveJobs() {
+        if (!confirm('Mark all active (processing) jobs as failed? In-flight operations will still complete but results will be discarded.')) return;
+        try {
+            const response = await fetch('/api/jobs/kill-active', { method: 'POST' });
+            const data = await response.json();
+            this.showSuccess(`Killed ${data.killed} active jobs`);
+            await this.refreshJobsCard();
+        } catch (e) {
+            this.showError('Failed to kill active jobs');
+        }
+    },
+
+    async refreshAllImages() {
+        if (!confirm('Queue image fetch for all artists and albums? User-uploaded images will not be affected.')) return;
+        try {
+            const response = await fetch('/api/images/fetch/all', { method: 'POST' });
+            const data = await response.json();
+            this.showSuccess(`Image fetch queued for ${data.artists} artists and ${data.albums} albums`);
+        } catch (e) {
+            this.showError('Failed to queue image fetch');
+        }
+    },
+
+    async refreshArtistImages(mbid) {
+        if (!confirm('Re-fetch images for this artist? User-uploaded images will not be affected.')) return;
+        try {
+            await fetch(`/api/images/fetch/artist/${mbid}`, { method: 'POST' });
+            this.showSuccess('Image fetch queued');
+        } catch (e) {
+            this.showError('Failed to queue image fetch');
+        }
+    },
+
+    async refreshAlbumImages(mbid) {
+        if (!confirm('Re-fetch images for this album? User-uploaded images will not be affected.')) return;
+        try {
+            await fetch(`/api/images/fetch/album/${mbid}`, { method: 'POST' });
+            this.showSuccess('Image fetch queued');
+        } catch (e) {
+            this.showError('Failed to queue image fetch');
+        }
+    },
+
+    async fetchAllAlbumImages(mbid) {
+        if (!confirm('Queue image fetch for all albums of this artist? User-uploaded images will not be affected.')) return;
+        try {
+            const response = await fetch(`/api/images/fetch/artist-albums/${mbid}`, { method: 'POST' });
+            const data = await response.json();
+            this.showSuccess(`Image fetch queued for ${data.queued} albums`);
+        } catch (e) {
+            this.showError('Failed to queue album image fetch');
         }
     },
 

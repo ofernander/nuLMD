@@ -460,6 +460,7 @@ class ArtistService {
         barcode, labels, artist_credit, media_count, track_count, disambiguation, media
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
       ON CONFLICT (mbid) DO UPDATE SET
+        release_group_mbid = EXCLUDED.release_group_mbid,
         title = EXCLUDED.title,
         status = EXCLUDED.status,
         release_date = EXCLUDED.release_date,
@@ -663,6 +664,23 @@ class ArtistService {
 
     const album = await database.getReleaseGroup(mbid);
 
+    // Always ensure primary artist is in artists table before formatting.
+    // formatAlbum needs it to build the artists array — without it artists: [] and MapTrack crashes.
+    if (album) {
+      const artistCredit = typeof album.artist_credit === 'string'
+        ? JSON.parse(album.artist_credit)
+        : album.artist_credit;
+      if (artistCredit && artistCredit.length > 0) {
+        const artistId = artistCredit[0].artist.id;
+        const artistExists = await database.getArtist(artistId);
+        if (!artistExists) {
+          logger.info(`ensureAlbum: artist ${artistId} not in DB, fetching`);
+          const artistData = await mbProvider.getArtist(artistId);
+          await this.storeArtist(artistId, artistData, true);
+        }
+      }
+    }
+
     // Serve from cache if within TTL
     if (album && album.ttl_expires_at && new Date(album.ttl_expires_at) > new Date()) {
       logger.info(`Album ${mbid} within TTL, serving from DB`);
@@ -732,16 +750,22 @@ class ArtistService {
       if (existingReleases.rows.length === 0) {
         logger.info(`Album ${mbid} exists but has no releases, fetching`);
         const releases = await mbProvider.getReleasesByReleaseGroup(mbid);
-        const target = releases.find(r => r.status === 'Official') || releases[0];
-        if (target) {
+        const officialReleases = releases.filter(r => r.status === 'Official');
+        const topReleases = (officialReleases.length > 0 ? officialReleases : releases).slice(0, 3);
+        logger.info(`Album ${mbid} (exists, no releases): fetching ${topReleases.length} of ${releases.length} releases synchronously`);
+        for (const release of topReleases) {
           try {
-            const fullRelease = await mbProvider.getRelease(target.id);
-            await this.storeRelease(target.id, fullRelease);
-            logger.info(`Stored release ${target.id}`);
+            const fullRelease = await mbProvider.getRelease(release.id);
+            await this.storeRelease(release.id, fullRelease);
+            logger.info(`Stored release ${release.id}`);
           } catch (err) {
-            logger.error(`Failed to fetch release ${target.id}:`, err);
+            logger.error(`Failed to fetch release ${release.id}:`, err);
           }
         }
+        // Queue background fetch for remaining releases
+        const backgroundJobQueue = require('./backgroundJobQueue');
+        await backgroundJobQueue.queueJob('fetch_album_full', 'release_group', mbid, 1);
+        logger.info(`Queued full release fetch for album ${mbid}`);
       }
     }
 
