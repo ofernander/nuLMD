@@ -169,7 +169,10 @@
                         </div>
                         <div class="card">
                             <h2>Queue</h2>
-                            <button class="btn btn-secondary" style="width:100%;" onclick="ui.clearJobQueue()">Clear Pending Jobs</button>
+                            <div style="display: flex; flex-direction: column; gap: 0.5rem;">
+                                <button class="btn btn-secondary" style="width:100%;" onclick="ui.clearJobQueue()">Clear Pending Jobs</button>
+                                <button class="btn btn-danger" style="width:100%;" onclick="ui.killActiveJobs()">Kill Active Jobs</button>
+                            </div>
                         </div>
                     </div>
 

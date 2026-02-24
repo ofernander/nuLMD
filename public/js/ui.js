@@ -1377,6 +1377,18 @@ const ui = {
         }
     },
 
+    async killActiveJobs() {
+        if (!confirm('Mark all active (processing) jobs as failed? In-flight operations will still complete but results will be discarded.')) return;
+        try {
+            const response = await fetch('/api/jobs/kill-active', { method: 'POST' });
+            const data = await response.json();
+            this.showSuccess(`Killed ${data.killed} active jobs`);
+            await this.refreshJobsCard();
+        } catch (e) {
+            this.showError('Failed to kill active jobs');
+        }
+    },
+
     startAutoRefresh() {
         // Stats always poll at 1s
         this.refreshInterval = setInterval(() => {

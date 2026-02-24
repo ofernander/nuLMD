@@ -48,6 +48,17 @@ router.post('/jobs/clear', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+router.post('/jobs/kill-active', async (req, res, next) => {
+  try {
+    const result = await database.query(
+      `UPDATE metadata_jobs SET status = 'failed', error_message = 'Killed by user'
+       WHERE status = 'processing' RETURNING id`
+    );
+    logger.info(`Killed ${result.rows.length} active jobs`);
+    res.json({ success: true, killed: result.rows.length });
+  } catch (error) { next(error); }
+});
+
 // System stats
 router.get('/stats', async (req, res, next) => {
   try {
