@@ -29,7 +29,7 @@ class LidarrFormatter {
       artistaliases: aliases || [],
       artistname: artist.name,
       disambiguation: artist.disambiguation || '',
-      genres: genres || [],
+      genres: (genres || []).map(g => this.toTitleCase(g)),
       id: artist.mbid,
       images: images || [],
       links: links || [],
@@ -62,7 +62,7 @@ class LidarrFormatter {
       artistaliases: aliases || [],
       artistname: artist.name,
       disambiguation: artist.disambiguation || '',
-      genres: genres || [],
+      genres: (genres || []).map(g => this.toTitleCase(g)),
       id: artist.mbid,
       images: images || [],
       links: links || [],
@@ -150,7 +150,7 @@ class LidarrFormatter {
             artistaliases: this.parseJson(a.aliases) || [],
             artistname: a.name,
             disambiguation: a.disambiguation || '',
-            genres: this.parseJson(a.genres) || [],
+            genres: (this.parseJson(a.genres) || []).map(g => this.toTitleCase(g)),
             id: a.mbid,
             images: imagesMap.get(id) || [],
             links: linksMap.get(id) || [],
@@ -199,14 +199,18 @@ class LidarrFormatter {
       title: releaseGroup.title,
       disambiguation: releaseGroup.disambiguation || '',
       overview: releaseGroup.overview || '',
-      releasedate: releaseGroup.first_release_date || '',
+      releasedate: releaseGroup.first_release_date
+        ? (releaseGroup.first_release_date instanceof Date
+            ? releaseGroup.first_release_date.toISOString().split('T')[0]
+            : String(releaseGroup.first_release_date).split('T')[0])
+        : '',
       artistid: artistId,
       artists: artists || [],
       releases: releases || [],
       aliases: [],
       oldids: [],
       rating: releaseGroup.rating ? { Count: 0, Value: parseFloat(releaseGroup.rating) } : { Count: 0, Value: null },
-      genres: genres || [],
+      genres: (genres || []).map(g => this.toTitleCase(g)),
       links: links || [],
       images: images || []
     };
@@ -361,7 +365,11 @@ class LidarrFormatter {
         title: release.title,
         disambiguation: release.disambiguation || '',
         status: release.status || 'Official',
-        releasedate: release.release_date || '',
+        releasedate: release.release_date
+          ? (release.release_date instanceof Date
+              ? release.release_date.toISOString().split('T')[0]
+              : String(release.release_date).split('T')[0])
+          : '',
         country: release.country ? [release.country] : [],
         label: labelNames || [],
         media: mediaOutput,
@@ -427,6 +435,11 @@ class LidarrFormatter {
         oldrecordingids: []
       };
     });
+  }
+
+  // Helper to apply title case to a string
+  toTitleCase(str) {
+    return str.replace(/\b\w/g, c => c.toUpperCase());
   }
 
   // Helper to parse JSON fields safely
