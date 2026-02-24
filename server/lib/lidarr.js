@@ -183,8 +183,9 @@ class LidarrFormatter {
     }
     const releases = await this.getReleasesForAlbum(mbid, null);
 
-    // Convert artistMap to array
-    const artists = Array.from(artistMap.values());
+    // Only return primary artist (artistCredit[0]) — same as old LMD
+    // Returning all credits causes Lidarr to auto-add every featured artist
+    const artists = artistMap.has(artistId) ? [artistMap.get(artistId)] : [];
 
     // Return with lowercase fields (old LMD format)
     return {
