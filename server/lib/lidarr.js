@@ -162,7 +162,7 @@ class LidarrFormatter {
             type: a.type || null
           });
         } else {
-          // Fallback if artist not in DB
+          // Fallback if artist not in DB — use data from artist_credit on the release group
           artistMap.set(id, {
             artistaliases: [],
             artistname: credit.artist.name,
@@ -174,19 +174,18 @@ class LidarrFormatter {
             oldids: [],
             overview: '',
             rating: { Count: 0, Value: null },
-            sortname: credit.artist.sort_name || '',
+            sortname: credit.artist['sort-name'] || credit.artist.name || '',
             status: 'active',
             type: null
           });
         }
       }
     }
-
-    // Get releases — only primary release group artists in artists array, matching old LMD behaviour
     const releases = await this.getReleasesForAlbum(mbid, null);
 
-    // Convert artistMap to array
-    const artists = Array.from(artistMap.values());
+    // Only return primary artist (artistCredit[0]) — same as old LMD
+    // Returning all credits causes Lidarr to auto-add every featured artist
+    const artists = artistMap.has(artistId) ? [artistMap.get(artistId)] : [];
 
     // Return with lowercase fields (old LMD format)
     return {

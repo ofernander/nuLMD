@@ -169,6 +169,16 @@ async function fetchArtistReleases(artistMbid, metadata) {
 
         // Ensure the release-group exists
         if (releaseGroup && releaseGroup.id) {
+          // Only process release groups where this artist appears in the release group
+          // artist credit. MB browse-releases returns ALL releases where the artist
+          // appears in any capacity (track features etc) — skip those.
+          const rgArtistCredit = releaseGroup['artist-credit'] || [];
+          const artistInCredit = rgArtistCredit.some(c => c.artist?.id === artistMbid);
+          if (rgArtistCredit.length > 0 && !artistInCredit) {
+            logger.info(`Skipping release ${release.id} - artist ${artistMbid} not in release group ${releaseGroup.id} artist credit`);
+            continue;
+          }
+
           // Check if release-group exists, if not create it
           const rgExists = await metaHandler.checkReleaseGroupExists(releaseGroup.id);
           if (!rgExists) {
@@ -330,11 +340,18 @@ async function fetchAlbumFull(releaseGroupMbid) {
   // Store release group (artist already in DB from synchronous path)
   await metaHandler.storeReleaseGroup(releaseGroupMbid, releaseGroupData, null);
 
-  // Fetch remaining releases — skip Official (already fetched synchronously), apply status filter
+  // Fetch remaining releases — skip only what's already stored in DB, apply status filter
   const allReleases = releaseGroupData.releases || [];
   const statusFilter = config.get('metadata.fetchTypes.releaseStatuses', ['Official']);
+  const database = require('../sql/database');
+  const storedResult = await database.query(
+    'SELECT mbid FROM releases WHERE release_group_mbid = $1',
+    [releaseGroupMbid]
+  );
+  const storedMbids = new Set(storedResult.rows.map(r => r.mbid));
+
   const remainingReleases = allReleases.filter(r => {
-    const alreadyFetched = r.status === 'Official';
+    const alreadyFetched = storedMbids.has(r.id);
     const matchesFilter = statusFilter.length === 0 || statusFilter.includes(r.status || 'Official');
     return !alreadyFetched && matchesFilter;
   });
