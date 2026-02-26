@@ -77,7 +77,7 @@ class ArtistService {
     return fullArtists;
   }
   
-  async storeArtist(mbid, data, isFullData = false) {
+  async storeArtist(mbid, data, isFullData = false, skipExtras = false) {
     const config = require('./config');
     const now = new Date();
     const ttlDays = config.get('refresh.artistTTL', 7);
@@ -210,7 +210,7 @@ class ArtistService {
     }
     
     // Queue wiki and image fetch jobs (handled by background queue worker pools)
-    if (isFullData) {
+    if (isFullData && !skipExtras) {
       const backgroundJobQueue = require('./backgroundJobQueue');
       await backgroundJobQueue.queueJob('fetch_artist_wiki', 'artist', mbid, 1);
       if (backgroundJobQueue.hasArtistImageProvider()) {
@@ -324,7 +324,7 @@ class ArtistService {
           );
           if (link.rows.length === 0) {
             await database.query(
-              'INSERT INTO artist_release_groups (artist_mbid, release_group_mbid, position) VALUES ($1, $2, 0)',
+              'INSERT INTO artist_release_groups (artist_mbid, release_group_mbid, position) VALUES ($1, $2, 0) ON CONFLICT DO NOTHING',
               [artistMbid, mbid]
             );
           }
@@ -389,6 +389,7 @@ class ArtistService {
         await database.query(`
           INSERT INTO artist_release_groups (artist_mbid, release_group_mbid, position)
           VALUES ($1, $2, 0)
+          ON CONFLICT DO NOTHING
         `, [artistMbid, mbid]);
       }
     }
@@ -671,12 +672,23 @@ class ArtistService {
         ? JSON.parse(album.artist_credit)
         : album.artist_credit;
       if (artistCredit && artistCredit.length > 0) {
-        const artistId = artistCredit[0].artist.id;
-        const artistExists = await database.getArtist(artistId);
-        if (!artistExists) {
-          logger.info(`ensureAlbum: artist ${artistId} not in DB, fetching`);
-          const artistData = await mbProvider.getArtist(artistId);
-          await this.storeArtist(artistId, artistData, true);
+        const missingArtists = [];
+        for (const credit of artistCredit) {
+          const exists = await database.getArtist(credit.artist.id);
+          if (!exists) missingArtists.push(credit);
+        }
+        if (missingArtists.length > 0) {
+          const backgroundJobQueue = require('./backgroundJobQueue');
+          backgroundJobQueue.pauseMbWorker();
+          try {
+            for (const credit of missingArtists) {
+              logger.info(`ensureAlbum: credited artist ${credit.artist.id} (${credit.artist.name}) not in DB, fetching inline`);
+              const artistData = await mbProvider.getArtist(credit.artist.id);
+              await this.storeArtist(credit.artist.id, artistData, true, true);
+            }
+          } finally {
+            backgroundJobQueue.resumeMbWorker();
+          }
         }
       }
     }
@@ -684,6 +696,7 @@ class ArtistService {
     // Serve from cache if within TTL
     if (album && album.ttl_expires_at && new Date(album.ttl_expires_at) > new Date()) {
       logger.info(`Album ${mbid} within TTL, serving from DB`);
+      await this._ensureTrackArtists(mbid, mbProvider);
       return lidarr.formatAlbum(mbid);
     }
 
@@ -695,10 +708,23 @@ class ArtistService {
       let artistId = null;
       if (releaseGroupData['artist-credit']?.length > 0) {
         artistId = releaseGroupData['artist-credit'][0].artist.id;
-        const artistExists = await database.getArtist(artistId);
-        if (!artistExists) {
-          logger.info(`Artist ${artistId} not in DB, fetching`);
-          await this.getArtist(artistId);
+        const missingArtists = [];
+        for (const credit of releaseGroupData['artist-credit']) {
+          const exists = await database.getArtist(credit.artist.id);
+          if (!exists) missingArtists.push(credit);
+        }
+        if (missingArtists.length > 0) {
+          const backgroundJobQueue = require('./backgroundJobQueue');
+          backgroundJobQueue.pauseMbWorker();
+          try {
+            for (const credit of missingArtists) {
+              logger.info(`ensureAlbum: credited artist ${credit.artist.id} (${credit.artist.name}) not in DB, fetching inline`);
+              const artistData = await mbProvider.getArtist(credit.artist.id);
+              await this.storeArtist(credit.artist.id, artistData, true, true);
+            }
+          } finally {
+            backgroundJobQueue.resumeMbWorker();
+          }
         }
       }
 
@@ -740,6 +766,9 @@ class ArtistService {
       await backgroundJobQueue.queueJob('fetch_album_full', 'release_group', mbid, 1);
       logger.info(`Queued full release fetch for album ${mbid}`);
 
+      // Ensure track-level credited artists are in DB
+      await this._ensureTrackArtists(mbid, mbProvider);
+
     } else {
       // Album exists - check releases
       const existingReleases = await database.query(
@@ -766,10 +795,53 @@ class ArtistService {
         const backgroundJobQueue = require('./backgroundJobQueue');
         await backgroundJobQueue.queueJob('fetch_album_full', 'release_group', mbid, 1);
         logger.info(`Queued full release fetch for album ${mbid}`);
+
+        // Ensure track-level credited artists are in DB
+        await this._ensureTrackArtists(mbid, mbProvider);
       }
     }
 
     return lidarr.formatAlbum(mbid);
+  }
+
+  async _ensureTrackArtists(releaseGroupMbid, mbProvider) {
+    const releases = await database.query(
+      'SELECT media FROM releases WHERE release_group_mbid = $1', [releaseGroupMbid]
+    );
+    const trackArtistIds = new Set();
+    for (const row of releases.rows) {
+      const media = typeof row.media === 'string' ? JSON.parse(row.media) : row.media;
+      if (!media) continue;
+      for (const medium of media) {
+        for (const track of (medium.tracks || [])) {
+          const ac = track['artist-credit'] || (track.recording && track.recording['artist-credit']) || [];
+          for (const credit of ac) {
+            if (credit.artist?.id) trackArtistIds.add(credit.artist.id);
+          }
+        }
+      }
+    }
+    if (trackArtistIds.size === 0) return;
+
+    const missing = [];
+    for (const id of trackArtistIds) {
+      const exists = await database.getArtist(id);
+      if (!exists) missing.push(id);
+    }
+    if (missing.length === 0) return;
+
+    logger.info(`ensureAlbum: ${missing.length} track-level artists not in DB for ${releaseGroupMbid}, fetching inline`);
+    const backgroundJobQueue = require('./backgroundJobQueue');
+    backgroundJobQueue.pauseMbWorker();
+    try {
+      for (const id of missing) {
+        logger.info(`ensureAlbum: track artist ${id} not in DB, fetching inline`);
+        const artistData = await mbProvider.getArtist(id);
+        await this.storeArtist(id, artistData, true, true);
+      }
+    } finally {
+      backgroundJobQueue.resumeMbWorker();
+    }
   }
 
   matchesStatusFilter(release) {

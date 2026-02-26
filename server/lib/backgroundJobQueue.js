@@ -29,6 +29,7 @@ class BackgroundJobQueue {
     this.mbWorkers = 0;
     this.maxMbWorkers = 1;
     this.mbInterval = null;
+    this.mbPaused = false;
 
     // Wiki worker pool
     this.wikiWorkers = 0;
@@ -42,6 +43,18 @@ class BackgroundJobQueue {
 
     // processJob fn injected at startup
     this._processJobFn = null;
+  }
+
+  // ─── MB worker pause/resume for inline priority fetches ─────────────────────
+
+  pauseMbWorker() {
+    this.mbPaused = true;
+    logger.info('MB worker paused for inline priority fetch');
+  }
+
+  resumeMbWorker() {
+    this.mbPaused = false;
+    logger.info('MB worker resumed');
   }
 
   // ─── Provider availability helpers ──────────────────────────────────────────
@@ -145,7 +158,7 @@ class BackgroundJobQueue {
 
   _startMbPool(intervalMs) {
     this.mbInterval = setInterval(async () => {
-      if (this.mbWorkers >= this.maxMbWorkers) return;
+      if (this.mbPaused || this.mbWorkers >= this.maxMbWorkers) return;
       try {
         const job = await this._getNextJob(MB_JOB_TYPES);
         if (job) {
