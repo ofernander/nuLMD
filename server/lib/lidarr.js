@@ -134,17 +134,26 @@ class LidarrFormatter {
     // Extract primary artist ID
     const artistId = artistCredit && artistCredit.length > 0 ? artistCredit[0].artist.id : '';
 
-    // Create artistMap and populate with album artists — batch fetch (3 queries regardless of artist count)
+    // Populate artistMap ONLY from track-level artist IDs (matching oldLMD behavior)
     const artistMap = new Map();
-    if (artistCredit && artistCredit.length > 0) {
-      const artistMbids = artistCredit.map(c => c.artist.id);
-      const artistsMap = await this.getArtistsBatch(artistMbids);
-      const linksMap = await this.getLinksBatch('artist', artistMbids);
-      const imagesMap = await this.getImagesBatch('artist', artistMbids);
+    const releases = await this.getReleasesForAlbum(mbid, null);
 
-      for (const credit of artistCredit) {
-        const id = credit.artist.id;
-        const a = artistsMap.get(id);
+    // Collect ALL unique track-level artist IDs
+    const trackArtistIds = new Set();
+    for (const release of (releases || [])) {
+      for (const track of (release.tracks || [])) {
+        if (track.artistid) {
+          trackArtistIds.add(track.artistid);
+        }
+      }
+    }
+    if (trackArtistIds.size > 0) {
+      const trackArtistMbids = [...trackArtistIds];
+      const trackArtistsMap = await this.getArtistsBatch(trackArtistMbids);
+      const trackLinksMap = await this.getLinksBatch('artist', trackArtistMbids);
+      const trackImagesMap = await this.getImagesBatch('artist', trackArtistMbids);
+      for (const id of trackArtistMbids) {
+        const a = trackArtistsMap.get(id);
         if (a) {
           artistMap.set(id, {
             artistaliases: this.parseJson(a.aliases) || [],
@@ -152,8 +161,8 @@ class LidarrFormatter {
             disambiguation: a.disambiguation || '',
             genres: (this.parseJson(a.genres) || []).map(g => this.toTitleCase(g)),
             id: a.mbid,
-            images: imagesMap.get(id) || [],
-            links: linksMap.get(id) || [],
+            images: trackImagesMap.get(id) || [],
+            links: trackLinksMap.get(id) || [],
             oldids: [],
             overview: a.overview || '',
             rating: a.rating ? { Count: 0, Value: parseFloat(a.rating) } : { Count: 0, Value: null },
@@ -162,30 +171,18 @@ class LidarrFormatter {
             type: a.type || null
           });
         } else {
-          // Fallback if artist not in DB — use data from artist_credit on the release group
           artistMap.set(id, {
-            artistaliases: [],
-            artistname: credit.artist.name,
-            disambiguation: credit.artist.disambiguation || '',
-            genres: [],
-            id: id,
-            images: [],
-            links: [],
-            oldids: [],
-            overview: '',
-            rating: { Count: 0, Value: null },
-            sortname: credit.artist['sort-name'] || credit.artist.name || '',
-            status: 'active',
-            type: null
+            artistaliases: [], artistname: id, disambiguation: '',
+            genres: [], id: id, images: [], links: [], oldids: [],
+            overview: '', rating: { Count: 0, Value: null },
+            sortname: id, status: 'active', type: null
           });
         }
       }
     }
-    const releases = await this.getReleasesForAlbum(mbid, null);
 
-    // Only return primary artist (artistCredit[0]) — same as old LMD
-    // Returning all credits causes Lidarr to auto-add every featured artist
-    const artists = artistMap.has(artistId) ? [artistMap.get(artistId)] : [];
+    // Return all artists — album-level credits + track-level credits
+    const artists = [...artistMap.values()];
 
     // Return with lowercase fields (old LMD format)
     return {
@@ -297,6 +294,7 @@ class LidarrFormatter {
         rg.primary_type,
         rg.secondary_types,
         rg.first_release_date,
+        rg.artist_credit,
         COALESCE(
           (
             SELECT json_agg(DISTINCT r.status)
@@ -312,7 +310,11 @@ class LidarrFormatter {
       ORDER BY rg.first_release_date DESC NULLS LAST, rg.title
     `, [artistMbid]);
 
-    return (result.rows || []).map(album => {
+    // Filter to only albums where this artist is artist_credit[0] (matching oldLMD: position = 0)
+    return (result.rows || []).filter(album => {
+      const ac = this.parseJson(album.artist_credit);
+      return ac && ac.length > 0 && ac[0].artist && ac[0].artist.id === artistMbid;
+    }).map(album => {
       const secondaryTypes = this.parseJson(album.secondary_types);
       const releaseStatuses = this.parseJson(album.release_statuses);
 
@@ -344,7 +346,7 @@ class LidarrFormatter {
         media
       FROM releases
       WHERE release_group_mbid = $1
-      ORDER BY release_date DESC NULLS LAST, country, title
+      ORDER BY release_date ASC NULLS LAST, country, title
     `, [releaseGroupMbid]);
 
     return (result.rows || []).map(release => {
