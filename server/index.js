@@ -68,6 +68,13 @@ app.get('/artist/:mbid', async (req, res) => {
       backgroundJobQueue.queueJob('artist_full', 'artist', mbid, 5).catch(err => logger.error(`Failed to queue artist job ${mbid}:`, err));
     }
     const formatted = await metaHandler.ensureArtist(mbid);
+
+    // Queue wiki/image jobs — Lidarr explicitly requested this artist
+    backgroundJobQueue.queueJob('fetch_artist_wiki', 'artist', mbid, 1);
+    if (backgroundJobQueue.hasArtistImageProvider()) {
+      backgroundJobQueue.queueJob('fetch_artist_images', 'artist', mbid, 1);
+    }
+
     res.json(formatted);
   } catch (error) {
     logger.error(`Error on artist request ${req.params.mbid}:`, error);
@@ -87,6 +94,13 @@ app.get('/album/:mbid', async (req, res) => {
       backgroundJobQueue.queueJob('fetch_album_full', 'release_group', mbid, 5).catch(err => logger.error(`Failed to queue album job ${mbid}:`, err));
     }
     const formatted = await metaHandler.ensureAlbum(mbid);
+
+    // Queue wiki/image jobs — Lidarr explicitly requested this album
+    backgroundJobQueue.queueJob('fetch_album_wiki', 'release_group', mbid, 1);
+    if (backgroundJobQueue.hasAlbumImageProvider()) {
+      backgroundJobQueue.queueJob('fetch_album_images', 'release_group', mbid, 1);
+    }
+
     res.json(formatted);
   } catch (error) {
     logger.error(`Error on album request ${req.params.mbid}:`, error);

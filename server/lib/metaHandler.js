@@ -2,6 +2,7 @@ const database = require('../sql/database');
 const { logger } = require('./logger');
 const { registry } = require('./providerRegistry');
 const lidarr = require('./lidarr');
+const backgroundJobQueue = require('./backgroundJobQueue');
 
 class ArtistService {
   
@@ -77,7 +78,7 @@ class ArtistService {
     return fullArtists;
   }
   
-  async storeArtist(mbid, data, isFullData = false, skipExtras = false) {
+  async storeArtist(mbid, data, isFullData = false) {
     const config = require('./config');
     const now = new Date();
     const ttlDays = config.get('refresh.artistTTL', 7);
@@ -209,14 +210,7 @@ class ArtistService {
       logger.info(`Artist ${mbid} has no links to store`);
     }
     
-    // Queue wiki and image fetch jobs (handled by background queue worker pools)
-    if (isFullData && !skipExtras) {
-      const backgroundJobQueue = require('./backgroundJobQueue');
-      await backgroundJobQueue.queueJob('fetch_artist_wiki', 'artist', mbid, 1);
-      if (backgroundJobQueue.hasArtistImageProvider()) {
-        await backgroundJobQueue.queueJob('fetch_artist_images', 'artist', mbid, 1);
-      }
-    }
+    // Wiki and image jobs are queued in route handlers only — when Lidarr explicitly requests this artist
   }
   
   async storeLinks(entityType, entityMbid, links) {
@@ -373,10 +367,7 @@ class ArtistService {
       await this.storeLinks('release_group', mbid, data.links);
     }
 
-    // Queue wiki job (handled by background queue worker pool)
-    // Image job NOT queued here — only queued when Lidarr explicitly requests this album via ensureAlbum
-    const backgroundJobQueue = require('./backgroundJobQueue');
-    await backgroundJobQueue.queueJob('fetch_album_wiki', 'release_group', mbid, 1);
+    // Wiki and image jobs are queued in route handlers only — when Lidarr explicitly requests this album
 
     // Link artist to release group if not already linked
     if (artistMbid) {
@@ -678,13 +669,12 @@ class ArtistService {
           if (!exists) missingArtists.push(credit);
         }
         if (missingArtists.length > 0) {
-          const backgroundJobQueue = require('./backgroundJobQueue');
           backgroundJobQueue.pauseMbWorker();
           try {
             for (const credit of missingArtists) {
               logger.info(`ensureAlbum: credited artist ${credit.artist.id} (${credit.artist.name}) not in DB, fetching inline`);
               const artistData = await mbProvider.getArtist(credit.artist.id);
-              await this.storeArtist(credit.artist.id, artistData, true, true);
+              await this.storeArtist(credit.artist.id, artistData, true);
             }
           } finally {
             backgroundJobQueue.resumeMbWorker();
@@ -714,13 +704,12 @@ class ArtistService {
           if (!exists) missingArtists.push(credit);
         }
         if (missingArtists.length > 0) {
-          const backgroundJobQueue = require('./backgroundJobQueue');
           backgroundJobQueue.pauseMbWorker();
           try {
             for (const credit of missingArtists) {
               logger.info(`ensureAlbum: credited artist ${credit.artist.id} (${credit.artist.name}) not in DB, fetching inline`);
               const artistData = await mbProvider.getArtist(credit.artist.id);
-              await this.storeArtist(credit.artist.id, artistData, true, true);
+              await this.storeArtist(credit.artist.id, artistData, true);
             }
           } finally {
             backgroundJobQueue.resumeMbWorker();
@@ -737,12 +726,6 @@ class ArtistService {
       }
 
       await this.storeReleaseGroup(mbid, releaseGroupData, artistId);
-
-      // Queue album image job — only for albums Lidarr explicitly requested
-      const backgroundJobQueue = require('./backgroundJobQueue');
-      if (backgroundJobQueue.hasAlbumImageProvider()) {
-        await backgroundJobQueue.queueJob('fetch_album_images', 'release_group', mbid, 1);
-      }
 
       // Fetch first 3 Official releases — enough for Lidarr to import
       // Queue full fetch in background for remaining releases
@@ -792,7 +775,6 @@ class ArtistService {
           }
         }
         // Queue background fetch for remaining releases
-        const backgroundJobQueue = require('./backgroundJobQueue');
         await backgroundJobQueue.queueJob('fetch_album_full', 'release_group', mbid, 1);
         logger.info(`Queued full release fetch for album ${mbid}`);
 
@@ -831,13 +813,12 @@ class ArtistService {
     if (missing.length === 0) return;
 
     logger.info(`ensureAlbum: ${missing.length} track-level artists not in DB for ${releaseGroupMbid}, fetching inline`);
-    const backgroundJobQueue = require('./backgroundJobQueue');
     backgroundJobQueue.pauseMbWorker();
     try {
       for (const id of missing) {
         logger.info(`ensureAlbum: track artist ${id} not in DB, fetching inline`);
         const artistData = await mbProvider.getArtist(id);
-        await this.storeArtist(id, artistData, true, true);
+        await this.storeArtist(id, artistData, true);
       }
     } finally {
       backgroundJobQueue.resumeMbWorker();
