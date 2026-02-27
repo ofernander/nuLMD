@@ -83,6 +83,7 @@ router.get('/stats', async (req, res, next) => {
         connected: true,
         artists: parseInt(dbStats.artist_count),
         albums: parseInt(dbStats.album_count),
+        releases: parseInt(dbStats.release_count),
         tracks: parseInt(dbStats.track_count),
         size_mb: Math.round(parseInt(dbStats.db_size_bytes) / 1024 / 1024)
       },
@@ -640,6 +641,7 @@ router.post('/ui/fetch-artist/:mbid', async (req, res, next) => {
   try {
     const { mbid } = req.params;
     await backgroundJobQueue.queueJob('artist_full', 'artist', mbid, 10);
+    await backgroundJobQueue.queueJob('fetch_artist_albums', 'artist', mbid, 9);
     logger.info(`UI artist fetch queued for ${mbid}`);
     res.json({ success: true, message: `Fetch queued for ${mbid}` });
   } catch (error) {

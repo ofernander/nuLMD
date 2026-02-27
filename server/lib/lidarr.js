@@ -265,6 +265,9 @@ class LidarrFormatter {
     // Priority 1: Config file
     const configUrl = config.get('serverUrl');
     if (configUrl) {
+      if (!configUrl.startsWith('http://') && !configUrl.startsWith('https://')) {
+        return `http://${configUrl}`;
+      }
       return configUrl;
     }
     

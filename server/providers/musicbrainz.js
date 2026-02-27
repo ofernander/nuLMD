@@ -98,8 +98,7 @@ class MusicBrainzProvider extends BaseProvider {
             artist: artistMbid,
             limit,
             offset,
-            fmt: 'json',
-            type: 'album|ep|single|broadcast|other'
+            fmt: 'json'
           }
         });
 

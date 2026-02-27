@@ -75,6 +75,27 @@ class BackgroundJobQueue {
 
   // ─── Job queuing ────────────────────────────────────────────────────────────
 
+  /**
+   * Create a job record for tracking inline (synchronous) work.
+   * Job is created with 'processing' status — not queued for background workers.
+   * Call completeJob() when done.
+   */
+  async trackJob(jobType, entityType, entityMbid) {
+    try {
+      const result = await database.query(`
+        INSERT INTO metadata_jobs (job_type, entity_type, entity_mbid, status, started_at)
+        VALUES ($1, $2, $3, 'processing', NOW())
+        ON CONFLICT (job_type, entity_mbid) DO UPDATE
+          SET status = 'processing', started_at = NOW()
+        RETURNING id
+      `, [jobType, entityType, entityMbid]);
+      return result.rows[0].id;
+    } catch (error) {
+      logger.error('Failed to track job:', error);
+      return null;
+    }
+  }
+
   async queueJob(jobType, entityType, entityMbid, priority = 0, metadata = null) {
     try {
       const result = await database.query(`

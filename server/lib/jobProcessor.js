@@ -155,17 +155,7 @@ async function fetchArtistReleases(artistMbid, metadata) {
     // Store each release
     for (const release of releases) {
       try {
-        // Filter by release group type before doing anything
         const releaseGroup = release['release-group'];
-        if (releaseGroup && !metaHandler.matchesFetchTypeFilter(releaseGroup)) {
-          logger.info(`Skipping release ${release.id} - release group type (${releaseGroup['primary-type'] || 'null'}) not in fetch filter`);
-          continue;
-        }
-
-        if (!metaHandler.matchesStatusFilter(release)) {
-          logger.info(`Skipping release ${release.id} (status: ${release.status || 'null'}) - not in status filter`);
-          continue;
-        }
 
         // Ensure the release-group exists
         if (releaseGroup && releaseGroup.id) {
@@ -200,7 +190,7 @@ async function fetchArtistReleases(artistMbid, metadata) {
               firstReleaseDate: releaseDate,
               disambiguation: releaseGroup.disambiguation || '',
               artistCredit: releaseGroup['artist-credit'] || release['artist-credit'] || []
-            }, artistMbid);
+            }, artistMbid, { force: true });
           }
         }
         
@@ -230,7 +220,7 @@ async function fetchArtistReleases(artistMbid, metadata) {
   for (const rgMbid of releaseGroups) {
     try {
       const fullRgData = await mbProvider.getAlbum(rgMbid);
-      await metaHandler.storeReleaseGroup(rgMbid, fullRgData, artistMbid);
+      await metaHandler.storeReleaseGroup(rgMbid, fullRgData, artistMbid, { force: true });
     } catch (error) {
       logger.warn(`Failed to fetch release-group ${rgMbid} (will retry): ${error.message}`);
       failedReleaseGroups.push(rgMbid);
@@ -241,7 +231,7 @@ async function fetchArtistReleases(artistMbid, metadata) {
   const stillFailed = failedReleaseGroups.length > 0
     ? await retryFailed(failedReleaseGroups, async (rgMbid) => {
         const fullRgData = await mbProvider.getAlbum(rgMbid);
-        await metaHandler.storeReleaseGroup(rgMbid, fullRgData, artistMbid);
+        await metaHandler.storeReleaseGroup(rgMbid, fullRgData, artistMbid, { force: true });
       }, 'release-group')
     : [];
 
@@ -280,37 +270,52 @@ async function fetchArtistAlbums(artistMbid) {
   const mbProvider = registry.getProvider('musicbrainz');
   const database = require('../sql/database');
 
-  logger.info(`Fetching all albums for artist ${artistMbid}`);
+  // Get all release groups already stored for this artist
+  const releaseGroups = await metaHandler.getArtistReleaseGroups(artistMbid);
+  logger.info(`Background: artist ${artistMbid} has ${releaseGroups.length} release groups, checking for missing releases`);
 
-  // Get all albums from MB
-  const albums = await mbProvider.getArtistAlbums(artistMbid);
-  logger.info(`Found ${albums.length} albums for artist ${artistMbid}`);
-
-  // Apply configured fetch type filter
-  const filteredAlbums = albums.filter(a => metaHandler.matchesFetchTypeFilter(a));
-  logger.info(`Fetching ${filteredAlbums.length}/${albums.length} albums after type filter for artist ${artistMbid}`);
-
-  // First pass: store each album
+  let fetched = 0;
   const failedAlbums = [];
-  for (const album of filteredAlbums) {
+
+  for (const rgMbid of releaseGroups) {
+    // Skip if already has releases
+    const existing = await database.query(
+      'SELECT mbid FROM releases WHERE release_group_mbid = $1 LIMIT 1',
+      [rgMbid]
+    );
+    if (existing.rows.length > 0) continue;
+
     try {
-      const fullAlbum = await mbProvider.getReleaseGroup(album.id);
-      await metaHandler.storeReleaseGroup(album.id, fullAlbum, artistMbid);
+      const releases = await mbProvider.getReleasesByReleaseGroup(rgMbid);
+      const officialReleases = releases.filter(r => r.status === 'Official');
+      const toFetch = officialReleases.length > 0 ? officialReleases : releases;
+
+      for (const release of toFetch) {
+        const fullRelease = await mbProvider.getRelease(release.id);
+        await metaHandler.storeRelease(release.id, fullRelease);
+      }
+      fetched++;
+      logger.info(`Background: stored ${toFetch.length} releases for album ${rgMbid} (${fetched} albums processed)`);
     } catch (error) {
-      logger.warn(`Failed to fetch/store album ${album.id} (will retry): ${error.message}`);
-      failedAlbums.push(album);
+      logger.warn(`Background: failed to fetch releases for album ${rgMbid}: ${error.message}`);
+      failedAlbums.push(rgMbid);
     }
   }
 
   // Retry failures
   if (failedAlbums.length > 0) {
-    await retryFailed(failedAlbums, async (album) => {
-      const fullAlbum = await mbProvider.getReleaseGroup(album.id);
-      await metaHandler.storeReleaseGroup(album.id, fullAlbum, artistMbid);
-    }, 'album');
+    await retryFailed(failedAlbums, async (rgMbid) => {
+      const releases = await mbProvider.getReleasesByReleaseGroup(rgMbid);
+      const officialReleases = releases.filter(r => r.status === 'Official');
+      const toFetch = officialReleases.length > 0 ? officialReleases : releases;
+      for (const release of toFetch) {
+        const fullRelease = await mbProvider.getRelease(release.id);
+        await metaHandler.storeRelease(release.id, fullRelease);
+      }
+    }, 'album-releases');
   }
 
-  logger.info(`Completed fetching albums for artist ${artistMbid}: ${filteredAlbums.length} fetched (of ${albums.length} total), ${failedAlbums.length} initially failed`);
+  logger.info(`Background: completed fetching releases for artist ${artistMbid}: ${fetched} albums processed, ${failedAlbums.length} failed`);
 }
 
 /**
@@ -338,7 +343,7 @@ async function fetchAlbumFull(releaseGroupMbid) {
   const releaseGroupData = await mbProvider.getReleaseGroup(releaseGroupMbid);
 
   // Store release group (artist already in DB from synchronous path)
-  await metaHandler.storeReleaseGroup(releaseGroupMbid, releaseGroupData, null);
+  await metaHandler.storeReleaseGroup(releaseGroupMbid, releaseGroupData, null, { force: true });
 
   // Fetch remaining releases — skip only what's already stored in DB, apply status filter
   const allReleases = releaseGroupData.releases || [];
