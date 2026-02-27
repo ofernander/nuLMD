@@ -157,6 +157,13 @@ router.get('/artist/:mbid', async (req, res, next) => {
       
       // Return formatted data
       const formatted = await lidarr.formatArtist(mbid);
+
+      // Queue wiki/image jobs only when Lidarr requests this artist
+      await backgroundJobQueue.queueJob('fetch_artist_wiki', 'artist', mbid, 1);
+      if (backgroundJobQueue.hasArtistImageProvider()) {
+        await backgroundJobQueue.queueJob('fetch_artist_images', 'artist', mbid, 1);
+      }
+
       return res.json(formatted);
     }
 
@@ -164,6 +171,12 @@ router.get('/artist/:mbid', async (req, res, next) => {
     logger.info(`Artist ${mbid} not in DB, fetching from MusicBrainz`);
     await metaHandler.getArtist(mbid);
     
+    // Queue wiki/image jobs only when Lidarr requests this artist
+    await backgroundJobQueue.queueJob('fetch_artist_wiki', 'artist', mbid, 1);
+    if (backgroundJobQueue.hasArtistImageProvider()) {
+      await backgroundJobQueue.queueJob('fetch_artist_images', 'artist', mbid, 1);
+    }
+
     // Return formatted data
     const formatted = await lidarr.formatArtist(mbid);
     res.json(formatted);
@@ -178,6 +191,13 @@ router.get('/album/:mbid', async (req, res, next) => {
     const { mbid } = req.params;
 
     const formatted = await lidarr.formatAlbum(mbid);
+
+    // Queue wiki/image jobs only when Lidarr requests this album
+    await backgroundJobQueue.queueJob('fetch_album_wiki', 'release_group', mbid, 1);
+    if (backgroundJobQueue.hasAlbumImageProvider()) {
+      await backgroundJobQueue.queueJob('fetch_album_images', 'release_group', mbid, 1);
+    }
+
     res.json(formatted);
   } catch (error) {
     next(error);
