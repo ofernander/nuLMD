@@ -88,6 +88,7 @@ const ui = {
             document.getElementById('dashboardActiveJobs').textContent = stats.jobs.active + stats.jobs.pending;
             document.getElementById('dashboardArtistCount').textContent = stats.database.artists.toLocaleString();
             document.getElementById('dashboardAlbumCount').textContent = stats.database.albums.toLocaleString();
+            document.getElementById('dashboardReleaseCount').textContent = stats.database.releases.toLocaleString();
             document.getElementById('dashboardTrackCount').textContent = stats.database.tracks.toLocaleString();
             document.getElementById('dashboardMemoryUsage').textContent = `${stats.memory.used_mb} MB`;
         } catch (error) {
@@ -144,30 +145,6 @@ const ui = {
                     html += `<label for="providers.${name}.baseUrl">Custom Server URL (optional)</label>`;
                     html += `<input type="text" class="form-control" id="providers.${name}.baseUrl" value="${settings.baseUrl || ''}" placeholder="https://musicbrainz.org/ws/2">`;
                     html += '<small class="form-text">Leave empty to use default MusicBrainz server</small>';
-                    html += '</div>';
-
-                    const fetchTypes = config.metadata?.fetchTypes || {};
-                    const activeAlbumTypes = fetchTypes.albumTypes || ['Studio'];
-                    const activeStatuses = fetchTypes.releaseStatuses || ['Official'];
-
-                    html += '<div class="form-group">';
-                    html += '<label>Release Types to Fetch <small class="form-text" style="display:inline; margin-left: 0.5rem;">Applied when Lidarr requests an artist — explicit album requests always fetch regardless</small></label>';
-                    html += '<div style="margin-top: 0.5rem;">';
-                    html += '<strong style="font-size: 0.85rem; color: var(--text-secondary); display: block; margin-bottom: 0.4rem;">Release Types</strong>';
-                    html += '<div style="display: flex; flex-wrap: wrap; gap: 0.75rem;">';
-                    for (const type of ['Studio', 'Single', 'EP', 'Live', 'Compilation', 'Soundtrack', 'Remix', 'DJ-mix', 'Mixtape', 'Demo', 'Spokenword', 'Interview', 'Audiobook', 'Audio drama', 'Field recording', 'Broadcast', 'Other']) {
-                        const checked = activeAlbumTypes.includes(type) ? 'checked' : '';
-                        html += `<label style="display: flex; align-items: center; gap: 0.35rem; cursor: pointer;"><input type="checkbox" class="fetch-type-album" value="${type}" ${checked}> ${type}</label>`;
-                    }
-                    html += '</div>';
-                    html += '<strong style="font-size: 0.85rem; color: var(--text-secondary); display: block; margin: 0.75rem 0 0.4rem;">Release Statuses</strong>';
-                    html += '<div style="display: flex; flex-wrap: wrap; gap: 0.75rem;">';
-                    for (const status of ['Official', 'Promotion', 'Bootleg', 'Pseudo-Release']) {
-                        const checked = activeStatuses.includes(status) ? 'checked' : '';
-                        html += `<label style="display: flex; align-items: center; gap: 0.35rem; cursor: pointer;"><input type="checkbox" class="fetch-type-status" value="${status}" ${checked}> ${status}</label>`;
-                    }
-                    html += '</div>';
-                    html += '</div>';
                     html += '</div>';
                 } else {
                     // Other providers: Show enable toggle
@@ -871,7 +848,7 @@ const ui = {
 
     async saveMetadataSources() {
         try {
-            const config = { providers: {}, metadata: { fetchTypes: { albumTypes: [], releaseStatuses: [] } } };
+            const config = { providers: {} };
             
             // Collect all provider form values
             document.querySelectorAll('#metadataSourcesForm input, #metadataSourcesForm select').forEach(input => {
@@ -895,14 +872,6 @@ const ui = {
                         config.providers[providerName][key] = input.value;
                     }
                 }
-            });
-
-            // Collect fetch type checkboxes
-            document.querySelectorAll('.fetch-type-album:checked').forEach(cb => {
-                config.metadata.fetchTypes.albumTypes.push(cb.value);
-            });
-            document.querySelectorAll('.fetch-type-status:checked').forEach(cb => {
-                config.metadata.fetchTypes.releaseStatuses.push(cb.value);
             });
 
             await api.updateConfig(config);

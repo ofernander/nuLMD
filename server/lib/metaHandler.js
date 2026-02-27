@@ -278,14 +278,18 @@ class ArtistService {
     }
   }
   
-  async storeReleaseGroup(mbid, data, artistMbid) {
+  async storeReleaseGroup(mbid, data, artistMbid, { force = false } = {}) {
     const config = require('./config');
     const now = new Date();
     const ttlDays = config.get('refresh.artistTTL', 7);
     const ttlExpires = new Date(now.getTime() + (ttlDays * 24 * 60 * 60 * 1000));
     
-    // Date is already normalized in normalizeReleaseGroup
-    const releaseDate = data.firstReleaseDate || data['first-release-date'] || null;
+    // Normalize partial dates for Postgres (YYYY -> YYYY-01-01, YYYY-MM -> YYYY-MM-01)
+    let releaseDate = data.firstReleaseDate || data['first-release-date'] || null;
+    if (releaseDate) {
+      if (releaseDate.length === 4) releaseDate = `${releaseDate}-01-01`;
+      else if (releaseDate.length === 7) releaseDate = `${releaseDate}-01`;
+    }
 
     // Get artist name for album overview and image search
     let artistName = null;
@@ -305,11 +309,11 @@ class ArtistService {
       [mbid]
     );
 
-    // If within TTL and has overview, skip external provider fetches
-    if (existing.rows.length > 0) {
+    // If within TTL and has overview, skip update (unless force=true)
+    if (existing.rows.length > 0 && !force) {
       const rg = existing.rows[0];
       if (rg.ttl_expires_at && new Date(rg.ttl_expires_at) > new Date() && rg.overview) {
-        logger.info(`Release group ${mbid} within TTL, skipping external fetches`);
+        logger.info(`Release group ${mbid} within TTL, skipping update`);
         // Still ensure artist link exists
         if (artistMbid) {
           const link = await database.query(
@@ -584,7 +588,7 @@ class ArtistService {
       for (const album of newAlbums) {
         try {
           const fullAlbum = await mbProvider.getReleaseGroup(album.id);
-          await this.storeReleaseGroup(album.id, fullAlbum, mbid);
+          await this.storeReleaseGroup(album.id, fullAlbum, mbid, { force: true });
           logger.info(`Stored new album ${album.id}`);
         } catch (error) {
           logger.error(`Failed to fetch new album ${album.id}:`, error);
@@ -625,19 +629,26 @@ class ArtistService {
     if (existingAlbums.rows.length === 0) {
       logger.info(`Artist ${mbid} has no albums, fetching from MusicBrainz`);
       const albums = await mbProvider.getArtistAlbums(mbid);
-      logger.info(`Found ${albums.length} albums for artist ${mbid}`);
+      logger.info(`Found ${albums.length} release groups for artist ${mbid}, storing all`);
 
-      const filteredAlbums = albums.filter(a => this.matchesFetchTypeFilter(a));
-      logger.info(`Fetching ${filteredAlbums.length}/${albums.length} albums after type filter for artist ${mbid}`);
+      // Build default artist credit for albums missing it (browse endpoint doesn't always return it)
+      const artistRecord = await database.getArtist(mbid);
+      const defaultArtistCredit = [{
+        artist: { id: mbid, name: artistRecord ? artistRecord.name : '', disambiguation: '' },
+        name: artistRecord ? artistRecord.name : '',
+        joinPhrase: ''
+      }];
 
-      for (let i = 0; i < filteredAlbums.length; i++) {
-        const album = filteredAlbums[i];
+      for (let i = 0; i < albums.length; i++) {
+        const album = albums[i];
         try {
-          const fullAlbum = await mbProvider.getReleaseGroup(album.id);
-          await this.storeReleaseGroup(album.id, fullAlbum, mbid);
-          logger.info(`Stored release group ${album.id} (${i + 1}/${filteredAlbums.length})`);
+          if (!album.artistCredit || album.artistCredit.length === 0) {
+            album.artistCredit = defaultArtistCredit;
+          }
+          await this.storeReleaseGroup(album.id, album, mbid);
+          logger.info(`Stored release group ${album.id} (${i + 1}/${albums.length})`);
         } catch (err) {
-          logger.error(`Failed to fetch album ${album.id}:`, err);
+          logger.error(`Failed to store album ${album.id}:`, err);
         }
       }
     }
@@ -683,11 +694,18 @@ class ArtistService {
       }
     }
 
-    // Serve from cache if within TTL
+    // Serve from cache if within TTL and has releases
     if (album && album.ttl_expires_at && new Date(album.ttl_expires_at) > new Date()) {
-      logger.info(`Album ${mbid} within TTL, serving from DB`);
-      await this._ensureTrackArtists(mbid, mbProvider);
-      return lidarr.formatAlbum(mbid);
+      const hasReleases = await database.query(
+        'SELECT mbid FROM releases WHERE release_group_mbid = $1 LIMIT 1',
+        [mbid]
+      );
+      if (hasReleases.rows.length > 0) {
+        logger.info(`Album ${mbid} within TTL, serving from DB`);
+        await this._ensureTrackArtists(mbid, mbProvider);
+        return lidarr.formatAlbum(mbid);
+      }
+      logger.info(`Album ${mbid} within TTL but has no releases, fetching`);
     }
 
     if (!album) {
@@ -717,25 +735,21 @@ class ArtistService {
         }
       }
 
-      // If this release group doesn't match the configured fetch type filter,
-      // store metadata only — no releases, no tracks fetched
-      if (!this.matchesFetchTypeFilter(releaseGroupData)) {
-        logger.info(`Album ${mbid} (${releaseGroupData.primaryType || 'Unknown'}) skipped by fetch type filter — storing metadata only`);
-        await this.storeReleaseGroup(mbid, releaseGroupData, artistId);
-        return lidarr.formatAlbum(mbid);
-      }
-
       await this.storeReleaseGroup(mbid, releaseGroupData, artistId);
 
-      // Fetch first 3 Official releases — enough for Lidarr to import
-      // Queue full fetch in background for remaining releases
+      // Track inline work so UI shows it
+      const jobId = await backgroundJobQueue.trackJob('fetch_album_full', 'release_group', mbid);
+
+      // Fetch releases for this album — cap inline at 10 to avoid Lidarr timeout
+      const INLINE_RELEASE_CAP = 10;
       const releases = await mbProvider.getReleasesByReleaseGroup(mbid);
       const officialReleases = releases.filter(r => r.status === 'Official');
-      const topReleases = (officialReleases.length > 0 ? officialReleases : releases).slice(0, 3);
+      const toFetch = officialReleases.length > 0 ? officialReleases : releases;
+      const inlineReleases = toFetch.slice(0, INLINE_RELEASE_CAP);
 
-      logger.info(`Album ${mbid}: fetching ${topReleases.length} of ${releases.length} releases synchronously`);
+      logger.info(`Album ${mbid}: fetching ${inlineReleases.length} of ${toFetch.length} releases inline`);
 
-      for (const release of topReleases) {
+      for (const release of inlineReleases) {
         try {
           const fullRelease = await mbProvider.getRelease(release.id);
           await this.storeRelease(release.id, fullRelease);
@@ -745,12 +759,16 @@ class ArtistService {
         }
       }
 
-      // Queue remaining releases for background fetch — priority 1 (lowest) so Lidarr requests are never blocked
-      await backgroundJobQueue.queueJob('fetch_album_full', 'release_group', mbid, 1);
-      logger.info(`Queued full release fetch for album ${mbid}`);
-
       // Ensure track-level credited artists are in DB
       await this._ensureTrackArtists(mbid, mbProvider);
+
+      if (jobId) await backgroundJobQueue.completeJob(jobId);
+
+      // Queue background job for remaining releases if any
+      if (toFetch.length > INLINE_RELEASE_CAP) {
+        await backgroundJobQueue.queueJob('fetch_album_full', 'release_group', mbid, 1);
+        logger.info(`Queued background fetch for ${toFetch.length - INLINE_RELEASE_CAP} remaining releases for album ${mbid}`);
+      }
 
     } else {
       // Album exists - check releases
@@ -761,11 +779,47 @@ class ArtistService {
 
       if (existingReleases.rows.length === 0) {
         logger.info(`Album ${mbid} exists but has no releases, fetching`);
+
+        // Update release group with full data from MB (basic data was stored by ensureArtist)
+        const releaseGroupData = await mbProvider.getReleaseGroup(mbid);
+        const artistCredit2 = releaseGroupData.artistCredit || [];
+        const artistId2 = artistCredit2.length > 0 ? artistCredit2[0].artist.id : null;
+
+        // Ensure credited artists exist
+        if (artistCredit2.length > 0) {
+          const missingArtists2 = [];
+          for (const credit of artistCredit2) {
+            if (credit.artist?.id) {
+              const exists = await database.getArtist(credit.artist.id);
+              if (!exists) missingArtists2.push(credit);
+            }
+          }
+          if (missingArtists2.length > 0) {
+            backgroundJobQueue.pauseMbWorker();
+            try {
+              for (const credit of missingArtists2) {
+                logger.info(`ensureAlbum: credited artist ${credit.artist.id} (${credit.artist.name}) not in DB, fetching inline`);
+                const artistData = await mbProvider.getArtist(credit.artist.id);
+                await this.storeArtist(credit.artist.id, artistData, true);
+              }
+            } finally {
+              backgroundJobQueue.resumeMbWorker();
+            }
+          }
+        }
+
+        await this.storeReleaseGroup(mbid, releaseGroupData, artistId2, { force: true });
+
+        // Track inline work so UI shows it
+        const jobId2 = await backgroundJobQueue.trackJob('fetch_album_full', 'release_group', mbid);
+
+        const INLINE_RELEASE_CAP = 10;
         const releases = await mbProvider.getReleasesByReleaseGroup(mbid);
         const officialReleases = releases.filter(r => r.status === 'Official');
-        const topReleases = (officialReleases.length > 0 ? officialReleases : releases).slice(0, 3);
-        logger.info(`Album ${mbid} (exists, no releases): fetching ${topReleases.length} of ${releases.length} releases synchronously`);
-        for (const release of topReleases) {
+        const toFetch2 = officialReleases.length > 0 ? officialReleases : releases;
+        const inlineReleases2 = toFetch2.slice(0, INLINE_RELEASE_CAP);
+        logger.info(`Album ${mbid} (exists, no releases): fetching ${inlineReleases2.length} of ${toFetch2.length} releases inline`);
+        for (const release of inlineReleases2) {
           try {
             const fullRelease = await mbProvider.getRelease(release.id);
             await this.storeRelease(release.id, fullRelease);
@@ -774,12 +828,17 @@ class ArtistService {
             logger.error(`Failed to fetch release ${release.id}:`, err);
           }
         }
-        // Queue background fetch for remaining releases
-        await backgroundJobQueue.queueJob('fetch_album_full', 'release_group', mbid, 1);
-        logger.info(`Queued full release fetch for album ${mbid}`);
 
         // Ensure track-level credited artists are in DB
         await this._ensureTrackArtists(mbid, mbProvider);
+
+        if (jobId2) await backgroundJobQueue.completeJob(jobId2);
+
+        // Queue background job for remaining releases if any
+        if (toFetch2.length > INLINE_RELEASE_CAP) {
+          await backgroundJobQueue.queueJob('fetch_album_full', 'release_group', mbid, 1);
+          logger.info(`Queued background fetch for ${toFetch2.length - INLINE_RELEASE_CAP} remaining releases for album ${mbid}`);
+        }
       }
     }
 
