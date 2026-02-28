@@ -90,6 +90,25 @@ const ui = {
             }
             
             document.getElementById('dashboardActiveJobs').textContent = stats.jobs.active + stats.jobs.pending;
+
+            // Lidarr status
+            const lidarrEl = document.getElementById('dashboardLidarrStatus');
+            try {
+                const lidarrStatus = await fetch('/api/lidarr/status').then(r => r.json());
+                if (lidarrStatus.enabled && lidarrStatus.connected) {
+                    lidarrEl.textContent = 'Connected';
+                    lidarrEl.style.color = '#00A65B';
+                } else if (lidarrStatus.enabled) {
+                    lidarrEl.textContent = 'Disconnected';
+                    lidarrEl.style.color = '#f05050';
+                } else {
+                    lidarrEl.textContent = 'Not Configured';
+                    lidarrEl.style.color = 'var(--text-secondary)';
+                }
+            } catch (e) {
+                lidarrEl.textContent = 'Unknown';
+                lidarrEl.style.color = 'var(--text-secondary)';
+            }
             document.getElementById('dashboardArtistCount').textContent = stats.database.artists.toLocaleString();
             document.getElementById('dashboardAlbumCount').textContent = stats.database.albums.toLocaleString();
             document.getElementById('dashboardReleaseCount').textContent = stats.database.releases.toLocaleString();
@@ -174,6 +193,30 @@ const ui = {
                 html += '</div>';
             }
 
+            // Lidarr Integration card (separate from providers)
+            const lidarrInt = config.lidarrIntegration || {};
+            html += '<div class="card" style="margin-bottom: 15px;">';
+            html += '<h3>Lidarr Integration</h3>';
+            html += '<small class="form-text" style="display:block; margin-bottom: 1rem;">Connect to your Lidarr instance to trigger automatic metadata refreshes after nuLMD fetches new data.</small>';
+            html += '<div class="form-group">';
+            html += '<label for="lidarrIntegration.enabled">';
+            html += `<input type="checkbox" id="lidarrIntegration.enabled" ${lidarrInt.enabled ? 'checked' : ''}> Enabled`;
+            html += '</label>';
+            html += '</div>';
+            html += '<div class="form-group">';
+            html += '<label for="lidarrIntegration.url">Lidarr URL</label>';
+            html += `<input type="text" class="form-control" id="lidarrIntegration.url" value="${lidarrInt.url || ''}" placeholder="http://localhost:8686">`;
+            html += '</div>';
+            html += '<div class="form-group">';
+            html += '<label for="lidarrIntegration.apiKey">API Key</label>';
+            html += `<input type="text" class="form-control" id="lidarrIntegration.apiKey" value="${lidarrInt.apiKey || ''}" placeholder="Lidarr API key (Settings → General)">`;
+            html += '</div>';
+            html += '<div style="margin-top: 0.75rem;">';
+            html += '<button class="btn btn-secondary" onclick="ui.testLidarrConnection()">Test Connection</button>';
+            html += '<span id="lidarrTestResult" style="margin-left: 0.75rem; font-size: 0.85rem;"></span>';
+            html += '</div>';
+            html += '</div>';
+
             html += '<div style="display: flex; gap: 10px;">';
             html += '<button class="btn btn-primary" onclick="ui.saveMetadataSources()">Save Configuration</button>';
             html += '<button class="btn btn-secondary" onclick="ui.restartServer()">Restart Server</button>';
@@ -187,11 +230,16 @@ const ui = {
     },
 
     async loadMetadataBrowser() {
+        // Check Lidarr integration status for conditional UI
+        try {
+            const lidarrStatus = await fetch('/api/lidarr/status').then(r => r.json());
+            this.lidarrEnabled = lidarrStatus.enabled && lidarrStatus.connected;
+        } catch (e) {
+            this.lidarrEnabled = false;
+        }
+
         // Load metadata tree
         await this.loadMetadataTree();
-        
-        // Load refresh settings
-        await this.loadRefreshSettings();
     },
 
     async loadMetadataTree() {
@@ -209,9 +257,9 @@ const ui = {
 
             // Build table HTML
             let html = `
-                <div class="metadata-search">
-                    <input type="text" id="metadataSearchInput" placeholder="Search artists..." onkeyup="ui.filterMetadataTree()">
-                    <select id="albumTypeFilter" onchange="ui.applyFilters()" style="margin-left: 1rem; padding: 0.75rem; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 0.375rem; color: var(--text);">
+                <div class="metadata-search" style="display: flex; align-items: center; gap: 0.75rem; flex-wrap: nowrap;">
+                    <input type="text" id="metadataSearchInput" placeholder="Search artists..." onkeyup="ui.filterMetadataTree()" style="flex: 1; min-width: 150px; max-width: 300px;">
+                    <select id="albumTypeFilter" onchange="ui.applyFilters()" style="padding: 0.75rem; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 0.375rem; color: var(--text);">
                         <option value="all">All Types</option>
                         <option value="Album" selected>Studio Albums</option>
                         <option value="EP">EPs</option>
@@ -228,11 +276,15 @@ const ui = {
                         <option value="Mixtape/Street">Mixtapes</option>
                         <option value="Demo">Demos</option>
                     </select>
-                    <select id="releaseStatusFilter" onchange="ui.applyFilters()" style="margin-left: 0.5rem; padding: 0.75rem; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 0.375rem; color: var(--text);">
+                    <select id="releaseStatusFilter" onchange="ui.applyFilters()" style="padding: 0.75rem; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 0.375rem; color: var(--text);">
                         <option value="all">All Release Types</option>
                         <option value="Official" selected>Official Only</option>
                         <option value="Promotion">Promotional Only</option>
                         <option value="Bootleg">Bootleg Only</option>
+                    </select>
+                    <select id="emptyArtistFilter" onchange="ui.applyFilters()" style="padding: 0.75rem; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 0.375rem; color: var(--text);">
+                        <option value="hide" selected>Hide Empty Artists</option>
+                        <option value="show">Show Empty Artists</option>
                     </select>
                 </div>
                 <div class="metadata-table-wrapper">
@@ -270,7 +322,10 @@ const ui = {
                         <td>${artist.release_count}</td>
                         <td>${artist.track_count}</td>
                         <td>${lastUpdated}</td>
-                        <td><button class="btn-refresh" onclick="ui.refreshArtistMetadata('${artist.mbid}')">Fetch</button></td>
+                        <td>
+                            <button class="btn-refresh" onclick="ui.refreshArtistMetadata('${artist.mbid}')">Fetch</button>
+                            ${this.lidarrEnabled ? `<button class="btn-refresh" style="margin-left:0.25rem;" onclick="ui.refreshInLidarr('${artist.mbid}', this)">Refresh in Lidarr</button>` : ''}
+                        </td>
                     </tr>
                 `;
             }
@@ -289,6 +344,7 @@ const ui = {
             this.metadataSort = { column: 'name', direction: 'asc' };
             this.currentAlbumTypeFilter = this.currentAlbumTypeFilter || 'Album';
             this.currentReleaseStatusFilter = this.currentReleaseStatusFilter || 'Official';
+            this.hideEmptyArtists = this.hideEmptyArtists ?? true;
             this.rebuildMetadataTable();
 
         } catch (error) {
@@ -501,6 +557,7 @@ const ui = {
         
         this.currentAlbumTypeFilter = typeFilter;
         this.currentReleaseStatusFilter = statusFilter;
+        this.hideEmptyArtists = (document.getElementById('emptyArtistFilter')?.value || 'hide') === 'hide';
         
         // Close any expanded rows since filters changed
         const expandedIcons = document.querySelectorAll('.expand-icon.expanded');
@@ -521,86 +578,44 @@ const ui = {
                 trackRows.forEach(r => r.remove());
             }
         });
+
+        // Rebuild table to apply hide-empty filter
+        this.rebuildMetadataTable();
     },
 
     rebuildMetadataTable() {
-        const container = document.getElementById('metadataTree');
-        if (!container) return;
-        
-        // Rebuild entire table structure
-        let html = `
-            <div class="metadata-search">
-                <input type="text" id="metadataSearchInput" placeholder="Search artists..." onkeyup="ui.filterMetadataTree()">
-                <select id="albumTypeFilter" onchange="ui.applyFilters()" style="margin-left: 1rem; padding: 0.75rem; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 0.375rem; color: var(--text);">
-                    <option value="all" ${this.currentAlbumTypeFilter === 'all' ? 'selected' : ''}>All Types</option>
-                    <option value="Album" ${this.currentAlbumTypeFilter === 'Album' ? 'selected' : ''}>Studio Albums</option>
-                    <option value="EP" ${this.currentAlbumTypeFilter === 'EP' ? 'selected' : ''}>EPs</option>
-                    <option value="Single" ${this.currentAlbumTypeFilter === 'Single' ? 'selected' : ''}>Singles</option>
-                    <option value="Live" ${this.currentAlbumTypeFilter === 'Live' ? 'selected' : ''}>Live</option>
-                    <option value="Compilation" ${this.currentAlbumTypeFilter === 'Compilation' ? 'selected' : ''}>Compilations</option>
-                    <option value="Soundtrack" ${this.currentAlbumTypeFilter === 'Soundtrack' ? 'selected' : ''}>Soundtracks</option>
-                    <option value="Spokenword" ${this.currentAlbumTypeFilter === 'Spokenword' ? 'selected' : ''}>Spokenword</option>
-                    <option value="Interview" ${this.currentAlbumTypeFilter === 'Interview' ? 'selected' : ''}>Interviews</option>
-                    <option value="Audiobook" ${this.currentAlbumTypeFilter === 'Audiobook' ? 'selected' : ''}>Audiobooks</option>
-                    <option value="Audio drama" ${this.currentAlbumTypeFilter === 'Audio drama' ? 'selected' : ''}>Audio Dramas</option>
-                    <option value="Remix" ${this.currentAlbumTypeFilter === 'Remix' ? 'selected' : ''}>Remixes</option>
-                    <option value="DJ-mix" ${this.currentAlbumTypeFilter === 'DJ-mix' ? 'selected' : ''}>DJ Mixes</option>
-                    <option value="Mixtape/Street" ${this.currentAlbumTypeFilter === 'Mixtape/Street' ? 'selected' : ''}>Mixtapes</option>
-                    <option value="Demo" ${this.currentAlbumTypeFilter === 'Demo' ? 'selected' : ''}>Demos</option>
-                </select>
-                    <select id="releaseStatusFilter" onchange="ui.applyFilters()" style="margin-left: 0.5rem; padding: 0.75rem; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 0.375rem; color: var(--text);">
-                        <option value="all" ${this.currentReleaseStatusFilter === 'all' ? 'selected' : ''}>All Release Types</option>
-                        <option value="Official" ${this.currentReleaseStatusFilter === 'Official' ? 'selected' : ''}>Official Only</option>
-                        <option value="Promotion" ${this.currentReleaseStatusFilter === 'Promotion' ? 'selected' : ''}>Promotional Only</option>
-                        <option value="Bootleg" ${this.currentReleaseStatusFilter === 'Bootleg' ? 'selected' : ''}>Bootleg Only</option>
-                    </select>
-            </div>
-            <div class="metadata-table-wrapper">
-                <table class="metadata-table">
-                    <thead>
-                        <tr>
-                            <th class="sortable" onclick="event.stopPropagation(); ui.sortMetadataTree('name')">Name</th>
-                            <th>MBID</th>
-                            <th class="sortable" onclick="event.stopPropagation(); ui.sortMetadataTree('type')">Type</th>
-                            <th class="sortable" onclick="event.stopPropagation(); ui.sortMetadataTree('country')">Country</th>
-                            <th class="sortable" onclick="event.stopPropagation(); ui.sortMetadataTree('album_count')">Albums</th>
-                            <th class="sortable" onclick="event.stopPropagation(); ui.sortMetadataTree('release_count')">Releases</th>
-                            <th class="sortable" onclick="event.stopPropagation(); ui.sortMetadataTree('track_count')">Tracks</th>
-                            <th class="sortable" onclick="event.stopPropagation(); ui.sortMetadataTree('last_updated_at')">Last Updated</th>
-                            <th>Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody id="metadataTableBody">
-        `;
+        const tbody = document.getElementById('metadataTableBody');
+        if (!tbody) return;
+
+        tbody.innerHTML = '';
         
         for (const artist of this.metadataArtists) {
+            if (this.hideEmptyArtists && parseInt(artist.album_count) === 0) continue;
             const lastUpdated = artist.last_updated_at ? new Date(artist.last_updated_at).toLocaleDateString() + ' ' + new Date(artist.last_updated_at).toLocaleTimeString() : 'Never';
             
-            html += `
-                <tr class="level-0 artist-row" data-artist-id="${artist.mbid}" data-name="${artist.name.toLowerCase()}">
-                    <td>
-                        <span class="expand-icon" onclick="ui.toggleArtistExpand('${artist.mbid}')">▶</span>
-                        ${this.escapeHtml(artist.name)}
-                    </td>
-                    <td><a href="https://musicbrainz.org/artist/${artist.mbid}" target="_blank" class="mbid-link" onclick="event.stopPropagation()" title="View on MusicBrainz">${artist.mbid.substring(0, 8)}...</a></td>
-                    <td>${artist.type || '-'}</td>
-                    <td>${artist.country || '-'}</td>
-                    <td>${artist.album_count}</td>
-                    <td>${artist.release_count}</td>
-                    <td>${artist.track_count}</td>
-                    <td>${lastUpdated}</td>
-                    <td><button class="btn-refresh" onclick="ui.refreshArtistMetadata('${artist.mbid}')">Fetch</button></td>
-                </tr>
+            const row = document.createElement('tr');
+            row.className = 'level-0 artist-row';
+            row.setAttribute('data-artist-id', artist.mbid);
+            row.setAttribute('data-name', artist.name.toLowerCase());
+            row.innerHTML = `
+                <td>
+                    <span class="expand-icon" onclick="ui.toggleArtistExpand('${artist.mbid}')">▶</span>
+                    ${this.escapeHtml(artist.name)}
+                </td>
+                <td><a href="https://musicbrainz.org/artist/${artist.mbid}" target="_blank" class="mbid-link" onclick="event.stopPropagation()" title="View on MusicBrainz">${artist.mbid.substring(0, 8)}...</a></td>
+                <td>${artist.type || '-'}</td>
+                <td>${artist.country || '-'}</td>
+                <td>${artist.album_count}</td>
+                <td>${artist.release_count}</td>
+                <td>${artist.track_count}</td>
+                <td>${lastUpdated}</td>
+                <td>
+                    <button class="btn-refresh" onclick="ui.refreshArtistMetadata('${artist.mbid}')">Fetch</button>
+                    ${this.lidarrEnabled ? `<button class="btn-refresh" style="margin-left:0.25rem;" onclick="ui.refreshInLidarr('${artist.mbid}', this)">Refresh in Lidarr</button>` : ''}
+                </td>
             `;
+            tbody.appendChild(row);
         }
-        
-        html += `
-                    </tbody>
-                </table>
-            </div>
-        `;
-        
-        container.innerHTML = html;
     },
 
     filterMetadataTree() {
@@ -697,7 +712,10 @@ const ui = {
                 <td>${artist.release_count}</td>
                 <td>${artist.track_count}</td>
                 <td>${lastUpdated}</td>
-                <td><button class="btn-refresh" onclick="ui.refreshArtistMetadata('${artist.mbid}')">Fetch</button></td>
+                <td>
+                    <button class="btn-refresh" onclick="ui.refreshArtistMetadata('${artist.mbid}')">Fetch</button>
+                    ${this.lidarrEnabled ? `<button class="btn-refresh" style="margin-left:0.25rem;" onclick="ui.refreshInLidarr('${artist.mbid}', this)">Refresh in Lidarr</button>` : ''}
+                </td>
             `;
             
             tbody.appendChild(row);
@@ -758,103 +776,22 @@ const ui = {
         });
     },
 
-    async loadRefreshSettings() {
-        const statusDiv = document.getElementById('refreshStatus');
-        const formDiv = document.getElementById('refreshSettingsForm');
-
-        try {
-            const [status, config] = await Promise.all([
-                fetch('/api/refresh/status').then(r => r.json()),
-                api.getConfig()
-            ]);
-
-            // Display status
-            let statusHtml = '<div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px;">';
-            
-            if (status.lastRefresh) {
-                const lastRefreshDate = new Date(status.lastRefresh).toLocaleDateString();
-                statusHtml += `<div><strong>Last Bulk Refresh:</strong> ${lastRefreshDate}</div>`;
-                statusHtml += `<div><strong>Days Since Refresh:</strong> ${status.daysSinceRefresh}</div>`;
-                statusHtml += `<div><strong>Next Refresh Due:</strong> ${status.nextRefreshDue} days</div>`;
-            } else {
-                statusHtml += '<div><strong>Last Bulk Refresh:</strong> Never</div>';
-                statusHtml += '<div><strong>Next Refresh Due:</strong> On next scheduled check</div>';
-            }
-            
-            statusHtml += '</div>';
-            statusDiv.innerHTML = statusHtml;
-
-            // Display settings form
-            const artistTTL = config.refresh?.artistTTL || 7;
-            const bulkInterval = config.refresh?.bulkRefreshInterval || 180;
-
-            let formHtml = '';
-            formHtml += '<div class="form-group">';
-            formHtml += '<label for="refresh.artistTTL">Artist TTL (days)</label>';
-            formHtml += `<input type="number" class="form-control" id="refresh.artistTTL" value="${artistTTL}" min="1" max="365">`;
-            formHtml += '<small class="form-text">Days before artist data expires and refreshes on next access</small>';
-            formHtml += '</div>';
-
-            formHtml += '<div class="form-group">';
-            formHtml += '<label for="refresh.bulkRefreshInterval">Bulk Refresh Interval (days)</label>';
-            formHtml += `<input type="number" class="form-control" id="refresh.bulkRefreshInterval" value="${bulkInterval}" min="1" max="365">`;
-            formHtml += '<small class="form-text">Days between automatic bulk refresh of all artists</small>';
-            formHtml += '</div>';
-
-            formHtml += '<div style="display: flex; gap: 10px;">';
-            formHtml += '<button class="btn btn-primary" onclick="ui.saveRefreshSettings()">Save Settings</button>';
-            formHtml += `<button class="btn btn-secondary" onclick="ui.triggerBulkRefresh()" ${status.isRunning ? 'disabled' : ''}>Refresh All Artists Now</button>`;
-            formHtml += '</div>';
-
-            formDiv.innerHTML = formHtml;
-
-        } catch (error) {
-            console.error('Failed to load refresh settings:', error);
-            statusDiv.innerHTML = '<p class="alert alert-danger">Failed to load refresh status</p>';
-            formDiv.innerHTML = '';
-        }
-    },
-
-    async saveRefreshSettings() {
-        try {
-            const config = {
-                refresh: {
-                    artistTTL: parseInt(document.getElementById('refresh.artistTTL').value),
-                    bulkRefreshInterval: parseInt(document.getElementById('refresh.bulkRefreshInterval').value)
-                }
-            };
-
-            await api.updateConfig(config);
-            this.showSuccess('Refresh settings saved. Restart required.');
-        } catch (error) {
-            console.error('Failed to save refresh settings:', error);
-            this.showError('Failed to save refresh settings');
-        }
-    },
-
-    async triggerBulkRefresh() {
-        if (!confirm('Start bulk refresh of all artists? This may take a while.')) {
-            return;
-        }
-
-        try {
-            const response = await fetch('/api/refresh/all', { method: 'POST' });
-            if (!response.ok) throw new Error('Bulk refresh failed');
-            
-            this.showSuccess('Bulk refresh started in background');
-            
-            // Reload settings to show updated status
-            setTimeout(() => this.loadRefreshSettings(), 1000);
-        } catch (error) {
-            console.error('Failed to trigger bulk refresh:', error);
-            this.showError('Failed to start bulk refresh');
-        }
-    },
-
     async saveMetadataSources() {
         try {
             const config = { providers: {} };
-            
+
+            // Collect lidarrIntegration fields
+            const lidarrInt = {};
+            const lidarrEnabled = document.getElementById('lidarrIntegration.enabled');
+            const lidarrUrl = document.getElementById('lidarrIntegration.url');
+            const lidarrApiKey = document.getElementById('lidarrIntegration.apiKey');
+            if (lidarrEnabled) lidarrInt.enabled = lidarrEnabled.checked;
+            if (lidarrUrl) lidarrInt.url = lidarrUrl.value;
+            if (lidarrApiKey && lidarrApiKey.value && !lidarrApiKey.value.endsWith('***')) {
+                lidarrInt.apiKey = lidarrApiKey.value;
+            }
+            if (Object.keys(lidarrInt).length > 0) config.lidarrIntegration = lidarrInt;
+
             // Collect all provider form values
             document.querySelectorAll('#metadataSourcesForm input, #metadataSourcesForm select').forEach(input => {
                 const path = input.id.split('.');
@@ -977,6 +914,66 @@ const ui = {
         }
     },
 
+    // ─── Lidarr Integration ─────────────────────────────────────────────────
+
+    async testLidarrConnection() {
+        const resultEl = document.getElementById('lidarrTestResult');
+        resultEl.textContent = 'Testing...';
+        resultEl.style.color = 'var(--text-secondary)';
+
+        try {
+            const url = document.getElementById('lidarrIntegration.url')?.value || '';
+            const apiKey = document.getElementById('lidarrIntegration.apiKey')?.value || '';
+            const enabled = document.getElementById('lidarrIntegration.enabled')?.checked || false;
+
+            if (!url || !apiKey) {
+                resultEl.textContent = '✘ URL and API key required';
+                resultEl.style.color = '#f05050';
+                return;
+            }
+
+            // Save config first so the server has the latest values
+            const saveConfig = { lidarrIntegration: { enabled, url } };
+            if (!apiKey.endsWith('***')) saveConfig.lidarrIntegration.apiKey = apiKey;
+            await api.updateConfig(saveConfig);
+
+            const response = await fetch('/api/lidarr/test', { method: 'POST' });
+            const result = await response.json();
+
+            if (result.success) {
+                resultEl.textContent = `✔ Connected — Lidarr v${result.version}`;
+                resultEl.style.color = '#00A65B';
+            } else {
+                resultEl.textContent = `✘ ${result.error}`;
+                resultEl.style.color = '#f05050';
+            }
+        } catch (e) {
+            resultEl.textContent = `✘ ${e.message}`;
+            resultEl.style.color = '#f05050';
+        }
+    },
+
+    async refreshInLidarr(mbid, btn) {
+        btn.disabled = true;
+        btn.textContent = 'Refreshing...';
+        setTimeout(() => { btn.disabled = false; btn.textContent = 'Refresh in Lidarr'; }, 5000);
+
+        try {
+            const response = await fetch(`/api/lidarr/refresh/${mbid}`, { method: 'POST' });
+            const result = await response.json();
+
+            if (result.success) {
+                this.showSuccess('Lidarr refresh triggered');
+            } else if (result.skipped) {
+                this.showError('Artist not found in Lidarr');
+            } else {
+                this.showError(`Lidarr refresh failed: ${result.error}`);
+            }
+        } catch (e) {
+            this.showError('Failed to contact Lidarr');
+        }
+    },
+
     // ─── Images Tab ──────────────────────────────────────────────────────────
 
     async loadImagesTab() {
@@ -1011,8 +1008,25 @@ const ui = {
 
     filterImageArtistList() {
         const q = document.getElementById('imageArtistSearch').value.toLowerCase();
-        const filtered = (this.imageArtists || []).filter(a => a.name.toLowerCase().includes(q));
+        let filtered = (this.imageArtists || []);
+
+        // Apply image filter
+        const mode = document.getElementById('imageFilterMode')?.value || 'has';
+        if (mode === 'has') {
+            filtered = filtered.filter(a => (parseInt(a.artist_image_count) || 0) + (parseInt(a.album_image_count) || 0) > 0);
+        } else if (mode === 'no') {
+            filtered = filtered.filter(a => (parseInt(a.artist_image_count) || 0) + (parseInt(a.album_image_count) || 0) === 0);
+        }
+
+        // Apply text search
+        if (q) {
+            filtered = filtered.filter(a => a.name.toLowerCase().includes(q));
+        }
         this._renderImageArtistList(filtered);
+    },
+
+    applyImageFilter() {
+        this.filterImageArtistList();
     },
 
     async selectImageArtist(mbid, name) {
@@ -1318,16 +1332,27 @@ const ui = {
                                   : 'job-bar-pending';
                 const fillPct     = isDone || isFailed ? '100%' : isProcessing ? '60%' : '0%';
 
-                const albumCount   = parseInt(job.album_count) || 0;
-                const releaseCount = parseInt(job.release_count) || 0;
-                const trackCount   = parseInt(job.track_count) || 0;
-                const hasCounts    = albumCount > 0 || releaseCount > 0 || trackCount > 0;
-                const countsHtml   = hasCounts ? `
-                    <div class="job-counts">
-                        ${albumCount   > 0 ? `<span>${albumCount} albums</span>` : ''}
-                        ${releaseCount > 0 ? `<span>${releaseCount} releases</span>` : ''}
-                        ${trackCount   > 0 ? `<span>${trackCount} tracks</span>` : ''}
-                    </div>` : '';
+                // For image downloads, show cover type and provider instead of album/release/track counts
+                let detailHtml = '';
+                if (job.job_type === 'image_download') {
+                    const parts = [];
+                    if (job.cover_type) parts.push(job.cover_type);
+                    if (job.image_provider) parts.push(job.image_provider);
+                    if (parts.length > 0) {
+                        detailHtml = `<div class="job-counts"><span>${parts.join(' · ')}</span></div>`;
+                    }
+                } else {
+                    const albumCount   = parseInt(job.album_count) || 0;
+                    const releaseCount = parseInt(job.release_count) || 0;
+                    const trackCount   = parseInt(job.track_count) || 0;
+                    const hasCounts    = albumCount > 0 || releaseCount > 0 || trackCount > 0;
+                    detailHtml = hasCounts ? `
+                        <div class="job-counts">
+                            ${albumCount   > 0 ? `<span>${albumCount} albums</span>` : ''}
+                            ${releaseCount > 0 ? `<span>${releaseCount} releases</span>` : ''}
+                            ${trackCount   > 0 ? `<span>${trackCount} tracks</span>` : ''}
+                        </div>` : '';
+                }
 
                 const artistPrefix = job.artist_name
                     ? `<span class="job-artist-name">${this.escapeHtml(job.artist_name)}</span> — `
@@ -1342,7 +1367,7 @@ const ui = {
                         <div class="job-bar-track">
                             <div class="job-bar ${barClass} ${isProcessing ? 'job-bar-animated' : ''}" style="width: ${fillPct}"></div>
                         </div>
-                        ${countsHtml}
+                        ${detailHtml}
                     </div>`;
             }).join('');
         } catch (error) {

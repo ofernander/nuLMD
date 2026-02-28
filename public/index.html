@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>nuLMD</title>
-    <link rel="stylesheet" href="/css/core.css?v=28">
+    <link rel="stylesheet" href="/css/core.css?v=32">
 </head>
 <body>
     <div class="container">
@@ -26,7 +26,6 @@
         <nav class="tabs">
             <button class="tab active" data-tab="dashboard">Dashboard</button>
             <button class="tab" data-tab="browser">Metadata Browser</button>
-            <button class="tab" data-tab="testing">Search Metadata</button>
             <button class="tab" data-tab="images">Image Browser</button>
             <button class="tab" data-tab="sources">Metadata Sources</button>
             <button class="tab" data-tab="logs">Logs</button>
@@ -49,6 +48,10 @@
                         <div class="stat">
                             <div class="stat-label">Database</div>
                             <div class="stat-value" id="dashboardDbStatus">-</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Lidarr</div>
+                            <div class="stat-value" id="dashboardLidarrStatus">-</div>
                         </div>
                         <div class="stat">
                             <div class="stat-label">Active Jobs</div>
@@ -80,7 +83,7 @@
                 </div>
 
                 <div class="card">
-                    <h2>Job Queue</h2>
+                    <h2>Active Jobs</h2>
                     <div id="jobQueueCard" class="job-queue-container">
                         <div class="job-queue-empty">No jobs yet</div>
                     </div>
@@ -92,16 +95,26 @@
             <!-- Metadata Browser Tab -->
             <section id="browser-tab" class="tab-content">
                 <div class="card">
-                    <h2>Cached Metadata</h2>
-                    <div id="metadataTree">Loading...</div>
+                    <h2>Search Metadata from MusicBrainz</h2>
+
+                    <div class="form-group">
+                        <label>Artist Name</label>
+                        <input type="text" id="testQuery" class="form-control" placeholder="e.g., Tool, Alanis Morissette">
+                    </div>
+
+                    <div class="form-group">
+                        <label>Number of Results</label>
+                        <input type="number" id="testLimit" class="form-control" value="1" min="1" max="10">
+                    </div>
+
+                    <button class="btn btn-primary" onclick="ui.testSearch()">Search</button>
+
+                    <div id="testResults" class="test-results"></div>
                 </div>
 
                 <div class="card">
-                    <h2>Global Refresh Settings</h2>
-                    <div id="refreshStatus" style="margin-bottom: 20px;">
-                        <p>Loading refresh status...</p>
-                    </div>
-                    <div id="refreshSettingsForm">Loading...</div>
+                    <h2>Cached Metadata</h2>
+                    <div id="metadataTree">Loading...</div>
                 </div>
             </section>
 
@@ -122,36 +135,17 @@
 
 
 
-            <!-- Search Metadata Tab -->
-            <section id="testing-tab" class="tab-content">
-                <div class="card">
-                    <h2>Search Metadata from MusicBrainz</h2>
-                    <div class="alert alert-info">
-                        Search for an artist by name. Clicking Fetch will pull ALL albums, ALL releases, and ALL tracks for that artist from MusicBrainz and store them locally.
-                    </div>
-
-                    <div class="form-group">
-                        <label>Artist Name</label>
-                        <input type="text" id="testQuery" class="form-control" placeholder="e.g., Tool, Alanis Morissette">
-                    </div>
-
-                    <div class="form-group">
-                        <label>Number of Results</label>
-                        <input type="number" id="testLimit" class="form-control" value="1" min="1" max="10">
-                    </div>
-
-                    <button class="btn btn-primary" onclick="ui.testSearch()">Search</button>
-
-                    <div id="testResults" class="test-results"></div>
-                </div>
-            </section>
-
             <!-- Images Tab -->
             <section id="images-tab" class="tab-content">
                 <div style="display: grid; grid-template-columns: 280px 1fr; gap: 1.5rem; align-items: start;">
                     <div class="card" style="position: sticky; top: 1rem;">
                         <h2>Artists</h2>
                         <button class="btn btn-secondary" style="width:100%; margin-bottom: 0.75rem;" onclick="ui.refreshAllImages()">Fetch All Images</button>
+                        <select id="imageFilterMode" onchange="ui.applyImageFilter()" style="width: 100%; padding: 0.5rem; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 0.375rem; color: var(--text); margin-bottom: 0.75rem;">
+                            <option value="has" selected>Has Images</option>
+                            <option value="no">No Images</option>
+                            <option value="all">All Artists</option>
+                        </select>
                         <input type="text" id="imageArtistSearch" placeholder="Search artists..." oninput="ui.filterImageArtistList()" style="width: 100%; padding: 0.5rem; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 0.375rem; color: var(--text); margin-bottom: 0.75rem;">
                         <div id="imageArtistList" style="max-height: 70vh; overflow-y: auto;"></div>
                     </div>
@@ -193,7 +187,7 @@
         </footer>
     </div>
 
-    <script src="/js/main.js?v=29"></script>
-    <script src="/js/ui.js?v=29"></script>
+    <script src="/js/main.js?v=32"></script>
+    <script src="/js/ui.js?v=32"></script>
 </body>
 </html>

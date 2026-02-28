@@ -72,15 +72,16 @@ class Config {
         compatibilityMode: 'plugin', // or 'legacy'
         metadataProfile: 'default'
       },
+      lidarrIntegration: {
+        enabled: !!(process.env.LIDARR_URL && process.env.LIDARR_API_KEY),
+        url: process.env.LIDARR_URL || '',
+        apiKey: process.env.LIDARR_API_KEY || ''
+      },
       metadata: {
         fetchTypes: {
           albumTypes: ['Studio', 'EP', 'Single'], // Which release types to fetch — mirrors Metadata Browser filter
           releaseStatuses: ['Official'] // Release status filter — empty = no status filter
         }
-      },
-      refresh: {
-        artistTTL: parseInt(process.env.ARTIST_TTL_DAYS) || 7, // Days before artist data expires
-        bulkRefreshInterval: parseInt(process.env.BULK_REFRESH_DAYS) || 180 // Days between bulk refreshes
       }
     };
 

@@ -7,6 +7,7 @@ const { logger, getRecentLogs } = require('./logger');
 const metaHandler = require('./metaHandler');
 const lidarr = require('./lidarr');
 const backgroundJobQueue = require('./backgroundJobQueue');
+const lidarrClient = require('./lidarrClient');
 const database = require('../sql/database');
 const multer = require('multer');
 const fs = require('fs').promises;
@@ -159,8 +160,17 @@ router.get('/artist/:mbid', async (req, res, next) => {
       // Return formatted data
       const formatted = await lidarr.formatArtist(mbid);
 
-      // Queue wiki/image jobs only when Lidarr requests this artist
-      await backgroundJobQueue.queueJob('fetch_artist_wiki', 'artist', mbid, 1);
+      if (!artist.overview) {
+        const wikiDone = await database.query(
+          `SELECT 1 FROM metadata_jobs WHERE job_type = 'fetch_artist_wiki' AND entity_mbid = $1 AND status = 'completed' LIMIT 1`,
+          [mbid]
+        );
+        if (wikiDone.rows.length === 0) {
+          await backgroundJobQueue.queueJob('fetch_artist_wiki', 'artist', mbid, 1);
+        } else {
+          logger.info(`Wiki already fetched for artist ${mbid}, skipping`);
+        }
+      }
       if (backgroundJobQueue.hasArtistImageProvider()) {
         await backgroundJobQueue.queueJob('fetch_artist_images', 'artist', mbid, 1);
       }
@@ -172,7 +182,7 @@ router.get('/artist/:mbid', async (req, res, next) => {
     logger.info(`Artist ${mbid} not in DB, fetching from MusicBrainz`);
     await metaHandler.getArtist(mbid);
     
-    // Queue wiki/image jobs only when Lidarr requests this artist
+    // Always queue wiki for brand new artists
     await backgroundJobQueue.queueJob('fetch_artist_wiki', 'artist', mbid, 1);
     if (backgroundJobQueue.hasArtistImageProvider()) {
       await backgroundJobQueue.queueJob('fetch_artist_images', 'artist', mbid, 1);
@@ -193,8 +203,18 @@ router.get('/album/:mbid', async (req, res, next) => {
 
     const formatted = await lidarr.formatAlbum(mbid);
 
-    // Queue wiki/image jobs only when Lidarr requests this album
-    await backgroundJobQueue.queueJob('fetch_album_wiki', 'release_group', mbid, 1);
+    const rgCheck = await database.getReleaseGroup(mbid);
+    if (rgCheck && !rgCheck.overview) {
+      const wikiDone = await database.query(
+        `SELECT 1 FROM metadata_jobs WHERE job_type = 'fetch_album_wiki' AND entity_mbid = $1 AND status = 'completed' LIMIT 1`,
+        [mbid]
+      );
+      if (wikiDone.rows.length === 0) {
+        await backgroundJobQueue.queueJob('fetch_album_wiki', 'release_group', mbid, 1);
+      } else {
+        logger.info(`Wiki already fetched for album ${mbid}, skipping`);
+      }
+    }
     if (backgroundJobQueue.hasAlbumImageProvider()) {
       await backgroundJobQueue.queueJob('fetch_album_images', 'release_group', mbid, 1);
     }
@@ -275,6 +295,15 @@ router.get('/config', (req, res) => {
   if (cfg.providers?.fanart && !cfg.providers.fanart.apiKey) {
     cfg.providers.fanart.apiKey = process.env.FANART_API_KEY || '';
   }
+  // Resolve lidarrIntegration env vars
+  if (cfg.lidarrIntegration) {
+    if (!cfg.lidarrIntegration.url) {
+      cfg.lidarrIntegration.url = process.env.LIDARR_URL || '';
+    }
+    if (!cfg.lidarrIntegration.apiKey) {
+      cfg.lidarrIntegration.apiKey = process.env.LIDARR_API_KEY || '';
+    }
+  }
   // Show masked API keys (first half + ***) so user knows if configured
   if (cfg.providers) {
     Object.keys(cfg.providers).forEach(key => {
@@ -292,6 +321,11 @@ router.get('/config', (req, res) => {
         provider.token = provider.token.substring(0, half) + '***';
       }
     });
+  }
+  // Mask lidarrIntegration API key
+  if (cfg.lidarrIntegration?.apiKey && cfg.lidarrIntegration.apiKey.length > 4) {
+    const half = Math.ceil(cfg.lidarrIntegration.apiKey.length / 2);
+    cfg.lidarrIntegration.apiKey = cfg.lidarrIntegration.apiKey.substring(0, half) + '***';
   }
   res.json(cfg);
 });
@@ -671,17 +705,6 @@ router.post('/ui/fetch-album/:mbid', async (req, res, next) => {
 });
 
 // Refresh endpoints
-const bulkRefresher = require('./bulkRefresher');
-
-router.get('/refresh/status', async (req, res, next) => {
-  try {
-    const status = await bulkRefresher.getStatus();
-    res.json(status);
-  } catch (error) {
-    next(error);
-  }
-});
-
 router.post('/refresh/artist/:mbid', async (req, res, next) => {
   try {
     const { mbid } = req.params;
@@ -695,80 +718,197 @@ router.post('/refresh/artist/:mbid', async (req, res, next) => {
   }
 });
 
-router.post('/refresh/all', async (req, res, next) => {
+// Lidarr integration endpoints
+router.get('/lidarr/status', (req, res) => {
+  res.json(lidarrClient.getStats());
+});
+
+router.post('/lidarr/test', async (req, res, next) => {
   try {
-    // Start async, don't wait
-    bulkRefresher.triggerManualRefresh().catch(err => {
-      logger.error('Manual bulk refresh failed:', err);
-    });
-    
-    res.json({ success: true, message: 'Bulk refresh started in background' });
+    // Re-initialize from current config in case settings changed
+    lidarrClient.initialize();
+    if (!lidarrClient.enabled) {
+      return res.json({ success: false, error: 'Lidarr integration not configured — set URL and API key' });
+    }
+    const result = await lidarrClient.testConnection();
+    if (result.success) {
+      await lidarrClient.refreshArtistMap();
+    }
+    res.json(result);
   } catch (error) {
     next(error);
   }
 });
 
-// Recent jobs endpoint
+router.post('/lidarr/refresh/:mbid', async (req, res, next) => {
+  try {
+    const { mbid } = req.params;
+    if (!lidarrClient.enabled) {
+      return res.json({ success: false, error: 'Lidarr integration not enabled' });
+    }
+    const result = await lidarrClient.refreshArtistByMbid(mbid);
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Recent jobs endpoint (unified: metadata jobs + image downloads)
 router.get('/jobs/recent', async (req, res, next) => {
   try {
     const result = await database.query(`
-      SELECT 
-        j.id, j.job_type, j.entity_type, j.entity_mbid, j.status,
-        j.created_at, j.started_at, j.completed_at, j.error_message,
-        COALESCE(a.name, rg.title) as entity_name,
-        CASE
-          WHEN j.entity_type != 'artist' THEN
-            COALESCE(
-              (SELECT ar.name FROM artists ar
-               JOIN artist_release_groups arg_n ON arg_n.artist_mbid = ar.mbid
-               WHERE arg_n.release_group_mbid = j.entity_mbid
-               LIMIT 1),
-              (SELECT rg_ac.artist_credit->0->>'name'
-               FROM release_groups rg_ac
-               WHERE rg_ac.mbid = j.entity_mbid
+      SELECT * FROM (
+        -- Metadata jobs
+        SELECT 
+          j.id, j.job_type, j.entity_type, j.entity_mbid, j.status,
+          j.created_at, j.started_at, j.completed_at, j.error_message,
+          COALESCE(a.name, rg.title) as entity_name,
+          CASE
+            WHEN j.entity_type != 'artist' THEN
+              COALESCE(
+                (SELECT ar.name FROM artists ar
+                 JOIN artist_release_groups arg_n ON arg_n.artist_mbid = ar.mbid
+                 WHERE arg_n.release_group_mbid = j.entity_mbid
+                 LIMIT 1),
+                (SELECT rg_ac.artist_credit->0->>'name'
+                 FROM release_groups rg_ac
+                 WHERE rg_ac.mbid = j.entity_mbid
+                 LIMIT 1)
+              )
+            ELSE NULL
+          END as artist_name,
+          CASE
+            WHEN j.entity_type = 'artist' THEN
+              (SELECT COUNT(*) FROM release_groups rg2
+               JOIN artist_release_groups arg ON arg.release_group_mbid = rg2.mbid
+               WHERE arg.artist_mbid = j.entity_mbid)
+            ELSE 0
+          END as album_count,
+          CASE
+            WHEN j.entity_type = 'artist' THEN
+              (SELECT COUNT(*) FROM releases r
+               JOIN release_groups rg3 ON rg3.mbid = r.release_group_mbid
+               JOIN artist_release_groups arg2 ON arg2.release_group_mbid = rg3.mbid
+               WHERE arg2.artist_mbid = j.entity_mbid)
+            ELSE
+              (SELECT COUNT(*) FROM releases r WHERE r.release_group_mbid = j.entity_mbid)
+          END as release_count,
+          CASE
+            WHEN j.entity_type = 'artist' THEN
+              (SELECT COUNT(DISTINCT t.recording_mbid) FROM tracks t
+               JOIN releases r2 ON r2.mbid = t.release_mbid
+               JOIN release_groups rg4 ON rg4.mbid = r2.release_group_mbid
+               JOIN artist_release_groups arg3 ON arg3.release_group_mbid = rg4.mbid
+               WHERE arg3.artist_mbid = j.entity_mbid)
+            ELSE
+              (SELECT COUNT(DISTINCT t.recording_mbid) FROM tracks t
+               JOIN releases r3 ON r3.mbid = t.release_mbid
+               WHERE r3.release_group_mbid = j.entity_mbid)
+          END as track_count,
+          NULL as cover_type,
+          NULL as image_provider
+        FROM metadata_jobs j
+        LEFT JOIN artists a ON a.mbid = j.entity_mbid
+        LEFT JOIN release_groups rg ON rg.mbid = j.entity_mbid
+
+        UNION ALL
+
+        -- Pending image downloads
+        SELECT
+          i.id,
+          'image_download' as job_type,
+          i.entity_type,
+          i.entity_mbid,
+          'pending' as status,
+          i.last_verified_at as created_at,
+          NULL as started_at,
+          NULL as completed_at,
+          NULL as error_message,
+          COALESCE(a2.name, rg2.title) as entity_name,
+          CASE
+            WHEN i.entity_type != 'artist' THEN
+              (SELECT ar2.name FROM artists ar2
+               JOIN artist_release_groups arg4 ON arg4.artist_mbid = ar2.mbid
+               WHERE arg4.release_group_mbid = i.entity_mbid
                LIMIT 1)
-            )
-          ELSE NULL
-        END as artist_name,
-        CASE
-          WHEN j.entity_type = 'artist' THEN
-            (SELECT COUNT(*) FROM release_groups rg2
-             JOIN artist_release_groups arg ON arg.release_group_mbid = rg2.mbid
-             WHERE arg.artist_mbid = j.entity_mbid)
-          ELSE 0
-        END as album_count,
-        CASE
-          WHEN j.entity_type = 'artist' THEN
-            (SELECT COUNT(*) FROM releases r
-             JOIN release_groups rg3 ON rg3.mbid = r.release_group_mbid
-             JOIN artist_release_groups arg2 ON arg2.release_group_mbid = rg3.mbid
-             WHERE arg2.artist_mbid = j.entity_mbid)
-          ELSE
-            (SELECT COUNT(*) FROM releases r WHERE r.release_group_mbid = j.entity_mbid)
-        END as release_count,
-        CASE
-          WHEN j.entity_type = 'artist' THEN
-            (SELECT COUNT(DISTINCT t.recording_mbid) FROM tracks t
-             JOIN releases r2 ON r2.mbid = t.release_mbid
-             JOIN release_groups rg4 ON rg4.mbid = r2.release_group_mbid
-             JOIN artist_release_groups arg3 ON arg3.release_group_mbid = rg4.mbid
-             WHERE arg3.artist_mbid = j.entity_mbid)
-          ELSE
-            (SELECT COUNT(DISTINCT t.recording_mbid) FROM tracks t
-             JOIN releases r3 ON r3.mbid = t.release_mbid
-             WHERE r3.release_group_mbid = j.entity_mbid)
-        END as track_count
-      FROM metadata_jobs j
-      LEFT JOIN artists a ON a.mbid = j.entity_mbid
-      LEFT JOIN release_groups rg ON rg.mbid = j.entity_mbid
+            ELSE NULL
+          END as artist_name,
+          0 as album_count, 0 as release_count, 0 as track_count,
+          i.cover_type,
+          i.provider as image_provider
+        FROM images i
+        LEFT JOIN artists a2 ON a2.mbid = i.entity_mbid
+        LEFT JOIN release_groups rg2 ON rg2.mbid = i.entity_mbid
+        WHERE i.cached = false AND i.cache_failed = false
+
+        UNION ALL
+
+        -- Recently completed image downloads (last 5 minutes)
+        SELECT
+          i.id,
+          'image_download' as job_type,
+          i.entity_type,
+          i.entity_mbid,
+          'completed' as status,
+          i.last_verified_at as created_at,
+          NULL as started_at,
+          i.cached_at as completed_at,
+          NULL as error_message,
+          COALESCE(a3.name, rg3.title) as entity_name,
+          CASE
+            WHEN i.entity_type != 'artist' THEN
+              (SELECT ar3.name FROM artists ar3
+               JOIN artist_release_groups arg5 ON arg5.artist_mbid = ar3.mbid
+               WHERE arg5.release_group_mbid = i.entity_mbid
+               LIMIT 1)
+            ELSE NULL
+          END as artist_name,
+          0 as album_count, 0 as release_count, 0 as track_count,
+          i.cover_type,
+          i.provider as image_provider
+        FROM images i
+        LEFT JOIN artists a3 ON a3.mbid = i.entity_mbid
+        LEFT JOIN release_groups rg3 ON rg3.mbid = i.entity_mbid
+        WHERE i.cached = true AND i.cached_at > NOW() - INTERVAL '5 minutes'
+
+        UNION ALL
+
+        -- Recently failed image downloads (last 5 minutes)
+        SELECT
+          i.id,
+          'image_download' as job_type,
+          i.entity_type,
+          i.entity_mbid,
+          'failed' as status,
+          i.last_verified_at as created_at,
+          NULL as started_at,
+          NULL as completed_at,
+          i.cache_failed_reason as error_message,
+          COALESCE(a4.name, rg4.title) as entity_name,
+          CASE
+            WHEN i.entity_type != 'artist' THEN
+              (SELECT ar4.name FROM artists ar4
+               JOIN artist_release_groups arg6 ON arg6.artist_mbid = ar4.mbid
+               WHERE arg6.release_group_mbid = i.entity_mbid
+               LIMIT 1)
+            ELSE NULL
+          END as artist_name,
+          0 as album_count, 0 as release_count, 0 as track_count,
+          i.cover_type,
+          i.provider as image_provider
+        FROM images i
+        LEFT JOIN artists a4 ON a4.mbid = i.entity_mbid
+        LEFT JOIN release_groups rg4 ON rg4.mbid = i.entity_mbid
+        WHERE i.cache_failed = true AND i.last_verified_at > NOW() - INTERVAL '5 minutes'
+      ) combined
       ORDER BY
-        CASE j.status
+        CASE status
           WHEN 'processing' THEN 0
           WHEN 'pending'    THEN 1
           WHEN 'failed'     THEN 2
           WHEN 'completed'  THEN 3
         END ASC,
-        j.created_at DESC
+        created_at DESC
       LIMIT 50
     `);
     res.json(result.rows);
