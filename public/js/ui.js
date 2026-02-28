@@ -1,12 +1,16 @@
 const JOB_LABELS = {
-    fetch_artist:        'Artist',
-    fetch_artist_albums: 'Albums',
-    fetch_release:       'Release',
-    fetch_album_full:    'Full Album',
-    artist_full:         'Artist (Full)',
+    fetch_artist:        'Artist Metadata',
+    fetch_artist_albums: 'Artist Albums',
+    fetch_artist_wiki:   'Artist Wiki',
+    fetch_artist_images: 'Artist Images',
+    fetch_release:       'Release Data',
+    fetch_album_full:    'Album Releases',
+    fetch_album_wiki:    'Album Wiki',
+    fetch_album_images:  'Album Images',
+    artist_full:         'Full Artist Fetch',
     artist_releases:     'Artist Releases',
     release_tracks:      'Track Data',
-    download_image:      'Image'
+    download_image:      'Image Download'
 };
 
 // UI management functions
@@ -72,6 +76,8 @@ const ui = {
             ]);
 
             document.getElementById('dashboardVersion').textContent = version.version || '-';
+            const footerVersion = document.getElementById('footerVersion');
+            if (footerVersion) footerVersion.textContent = `v${version.version}` || 'v?';
             document.getElementById('dashboardUptime').textContent = stats.uptime || '-';
             
             const dbStatus = document.getElementById('dashboardDbStatus');
@@ -86,6 +92,7 @@ const ui = {
             document.getElementById('dashboardActiveJobs').textContent = stats.jobs.active + stats.jobs.pending;
             document.getElementById('dashboardArtistCount').textContent = stats.database.artists.toLocaleString();
             document.getElementById('dashboardAlbumCount').textContent = stats.database.albums.toLocaleString();
+            document.getElementById('dashboardReleaseCount').textContent = stats.database.releases.toLocaleString();
             document.getElementById('dashboardTrackCount').textContent = stats.database.tracks.toLocaleString();
             document.getElementById('dashboardMemoryUsage').textContent = `${stats.memory.used_mb} MB`;
         } catch (error) {
@@ -143,30 +150,6 @@ const ui = {
                     html += `<input type="text" class="form-control" id="providers.${name}.baseUrl" value="${settings.baseUrl || ''}" placeholder="https://musicbrainz.org/ws/2">`;
                     html += '<small class="form-text">Leave empty to use default MusicBrainz server</small>';
                     html += '</div>';
-
-                    const fetchTypes = config.metadata?.fetchTypes || {};
-                    const activeAlbumTypes = fetchTypes.albumTypes || ['Studio'];
-                    const activeStatuses = fetchTypes.releaseStatuses || ['Official'];
-
-                    html += '<div class="form-group">';
-                    html += '<label>Release Types to Fetch <small class="form-text" style="display:inline; margin-left: 0.5rem;">Applied when Lidarr requests an artist — explicit album requests always fetch regardless</small></label>';
-                    html += '<div style="margin-top: 0.5rem;">';
-                    html += '<strong style="font-size: 0.85rem; color: var(--text-secondary); display: block; margin-bottom: 0.4rem;">Release Types</strong>';
-                    html += '<div style="display: flex; flex-wrap: wrap; gap: 0.75rem;">';
-                    for (const type of ['Studio', 'Single', 'EP', 'Live', 'Compilation', 'Soundtrack', 'Remix', 'DJ-mix', 'Mixtape', 'Demo', 'Spokenword', 'Interview', 'Audiobook', 'Audio drama', 'Field recording', 'Broadcast', 'Other']) {
-                        const checked = activeAlbumTypes.includes(type) ? 'checked' : '';
-                        html += `<label style="display: flex; align-items: center; gap: 0.35rem; cursor: pointer;"><input type="checkbox" class="fetch-type-album" value="${type}" ${checked}> ${type}</label>`;
-                    }
-                    html += '</div>';
-                    html += '<strong style="font-size: 0.85rem; color: var(--text-secondary); display: block; margin: 0.75rem 0 0.4rem;">Release Statuses</strong>';
-                    html += '<div style="display: flex; flex-wrap: wrap; gap: 0.75rem;">';
-                    for (const status of ['Official', 'Promotion', 'Bootleg', 'Pseudo-Release']) {
-                        const checked = activeStatuses.includes(status) ? 'checked' : '';
-                        html += `<label style="display: flex; align-items: center; gap: 0.35rem; cursor: pointer;"><input type="checkbox" class="fetch-type-status" value="${status}" ${checked}> ${status}</label>`;
-                    }
-                    html += '</div>';
-                    html += '</div>';
-                    html += '</div>';
                 } else {
                     // Other providers: Show enable toggle
                     html += '<div class="form-group">';
@@ -176,11 +159,13 @@ const ui = {
                     html += '</label>';
                     html += '</div>';
                     
-                    // API Key if exists
-                    if (settings.apiKey !== undefined) {
+                    // API Key field — show for any provider that has apiKey, token, or clientSecret in config,
+                    // or for known providers that need keys
+                    const needsApiKey = ['fanart', 'lastfm', 'discogs'];
+                    if (settings.apiKey !== undefined || needsApiKey.includes(name)) {
                         html += '<div class="form-group">';
                         html += `<label for="providers.${name}.apiKey">API Key</label>`;
-                        const displayValue = settings.apiKey && settings.apiKey !== '' ? '***' : '';
+                        const displayValue = settings.apiKey && settings.apiKey !== '' ? settings.apiKey : '';
                         html += `<input type="text" class="form-control" id="providers.${name}.apiKey" value="${displayValue}" placeholder="Enter API key">`;
                         html += '</div>';
                     }
@@ -298,14 +283,13 @@ const ui = {
 
             container.innerHTML = html;
 
-            // Sort alphabetically before storing
+            // Sort alphabetically and rebuild
             artists.sort((a, b) => (a.name || '').toLowerCase().localeCompare((b.name || '').toLowerCase()));
-
-            // Store artists data - always reset sort to alphabetical on load
             this.metadataArtists = artists;
             this.metadataSort = { column: 'name', direction: 'asc' };
             this.currentAlbumTypeFilter = this.currentAlbumTypeFilter || 'Album';
             this.currentReleaseStatusFilter = this.currentReleaseStatusFilter || 'Official';
+            this.rebuildMetadataTable();
 
         } catch (error) {
             console.error('Failed to load metadata tree:', error);
@@ -706,7 +690,7 @@ const ui = {
                     <span class="expand-icon" onclick="ui.toggleArtistExpand('${artist.mbid}')">▶</span>
                     ${this.escapeHtml(artist.name)}
                 </td>
-                <td><span class="mbid-copy" onclick="event.stopPropagation(); ui.copyToClipboard('${artist.mbid}')" title="Click to copy MBID">${artist.mbid.substring(0, 8)}...</span></td>
+                <td><a href="https://musicbrainz.org/artist/${artist.mbid}" target="_blank" class="mbid-link" onclick="event.stopPropagation()" title="View on MusicBrainz">${artist.mbid.substring(0, 8)}...</a></td>
                 <td>${artist.type || '-'}</td>
                 <td>${artist.country || '-'}</td>
                 <td>${artist.album_count}</td>
@@ -869,7 +853,7 @@ const ui = {
 
     async saveMetadataSources() {
         try {
-            const config = { providers: {}, metadata: { fetchTypes: { albumTypes: [], releaseStatuses: [] } } };
+            const config = { providers: {} };
             
             // Collect all provider form values
             document.querySelectorAll('#metadataSourcesForm input, #metadataSourcesForm select').forEach(input => {
@@ -888,23 +872,15 @@ const ui = {
                 } else if (input.type === 'number') {
                     config.providers[providerName][key] = parseFloat(input.value);
                 } else {
-                    // Don't save masked values
-                    if (input.value !== '***' && input.value !== '') {
+                    // Don't save masked values (contain ***)
+                    if (input.value && !input.value.endsWith('***') && input.value !== '') {
                         config.providers[providerName][key] = input.value;
                     }
                 }
             });
 
-            // Collect fetch type checkboxes
-            document.querySelectorAll('.fetch-type-album:checked').forEach(cb => {
-                config.metadata.fetchTypes.albumTypes.push(cb.value);
-            });
-            document.querySelectorAll('.fetch-type-status:checked').forEach(cb => {
-                config.metadata.fetchTypes.releaseStatuses.push(cb.value);
-            });
-
             await api.updateConfig(config);
-            this.showSuccess('Metadata sources saved. Changes take effect immediately.');
+            this.showSuccess('Metadata Changes Require Server Restart');
         } catch (error) {
             console.error('Failed to save metadata sources:', error);
             this.showError('Failed to save metadata sources');
@@ -1059,7 +1035,10 @@ const ui = {
             html += '<div class="card" style="margin-bottom: 1.5rem;">';
             html += `<div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem;">`;
             html += `<h2>${this.escapeHtml(name)} — Artist Images</h2>`;
+            html += `<div style="display: flex; gap: 0.5rem;">`;
+            html += `<button class="btn btn-secondary" onclick="ui.refreshArtistImages('${mbid}')">Fetch Images</button>`;
             html += `<button class="btn btn-secondary" onclick="ui.showUploadForm('artist', '${mbid}', null)">Upload Image</button>`;
+            html += `</div>`;
             html += '</div>';
             html += this._renderImageGrid(artistImages, 'artist');
             html += '</div>';
@@ -1067,7 +1046,10 @@ const ui = {
             // Albums
             if (albums.length > 0) {
                 html += '<div class="card">';
-                html += '<h2>Album Images</h2>';
+                html += `<div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem;">`;
+                html += `<h2 style="margin: 0;">Album Images</h2>`;
+                html += `<button class="btn btn-secondary" onclick="ui.fetchAllAlbumImages('${mbid}')">Fetch All Album Images</button>`;
+                html += `</div>`;
                 html += '<div id="imageAlbumList">';
                 for (const album of albums) {
                     const year = album.first_release_date ? album.first_release_date.substring(0, 4) : '?';
@@ -1078,7 +1060,10 @@ const ui = {
                                     <strong>${this.escapeHtml(album.title)}</strong>
                                     <span style="color: var(--text-secondary); font-size: 0.85rem; margin-left: 0.5rem;">${year} &middot; ${album.primary_type || ''}</span>
                                 </div>
+                                <div style="display: flex; gap: 0.5rem;">
+                                <button class="btn btn-secondary" style="font-size: 0.8rem; padding: 0.3rem 0.75rem;" onclick="ui.refreshAlbumImages('${album.mbid}')">Fetch Image</button>
                                 <button class="btn btn-secondary" style="font-size: 0.8rem; padding: 0.3rem 0.75rem;" onclick="ui.showUploadForm('album', '${album.mbid}', '${album.mbid}')">Upload Image</button>
+                                </div>
                             </div>
                             <div id="album-images-${album.mbid}">
                                 <p style="color: var(--text-secondary); font-size: 0.85rem;">Loading...</p>
@@ -1389,6 +1374,48 @@ const ui = {
         }
     },
 
+    async refreshAllImages() {
+        if (!confirm('Queue image fetch for all artists and albums? User-uploaded images will not be affected.')) return;
+        try {
+            const response = await fetch('/api/images/fetch/all', { method: 'POST' });
+            const data = await response.json();
+            this.showSuccess(`Image fetch queued for ${data.artists} artists and ${data.albums} albums`);
+        } catch (e) {
+            this.showError('Failed to queue image fetch');
+        }
+    },
+
+    async refreshArtistImages(mbid) {
+        if (!confirm('Re-fetch images for this artist? User-uploaded images will not be affected.')) return;
+        try {
+            await fetch(`/api/images/fetch/artist/${mbid}`, { method: 'POST' });
+            this.showSuccess('Image fetch queued');
+        } catch (e) {
+            this.showError('Failed to queue image fetch');
+        }
+    },
+
+    async refreshAlbumImages(mbid) {
+        if (!confirm('Re-fetch images for this album? User-uploaded images will not be affected.')) return;
+        try {
+            await fetch(`/api/images/fetch/album/${mbid}`, { method: 'POST' });
+            this.showSuccess('Image fetch queued');
+        } catch (e) {
+            this.showError('Failed to queue image fetch');
+        }
+    },
+
+    async fetchAllAlbumImages(mbid) {
+        if (!confirm('Queue image fetch for all albums of this artist? User-uploaded images will not be affected.')) return;
+        try {
+            const response = await fetch(`/api/images/fetch/artist-albums/${mbid}`, { method: 'POST' });
+            const data = await response.json();
+            this.showSuccess(`Image fetch queued for ${data.queued} albums`);
+        } catch (e) {
+            this.showError('Failed to queue album image fetch');
+        }
+    },
+
     startAutoRefresh() {
         // Stats always poll at 1s
         this.refreshInterval = setInterval(() => {
@@ -1430,13 +1457,22 @@ const ui = {
 
     showMessage(message, type) {
         const alertDiv = document.createElement('div');
-        alertDiv.className = `alert alert-${type}`;
+        alertDiv.className = `alert alert-${type} toast-notification`;
         alertDiv.textContent = message;
         alertDiv.style.position = 'fixed';
-        alertDiv.style.top = '20px';
         alertDiv.style.right = '20px';
         alertDiv.style.zIndex = '1000';
         alertDiv.style.maxWidth = '400px';
+
+        // Stack below existing toasts
+        const existing = document.querySelectorAll('.toast-notification');
+        let topOffset = 20;
+        existing.forEach(el => {
+            const rect = el.getBoundingClientRect();
+            const bottom = rect.top + rect.height + 10;
+            if (bottom > topOffset) topOffset = bottom;
+        });
+        alertDiv.style.top = topOffset + 'px';
 
         document.body.appendChild(alertDiv);
 

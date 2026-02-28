@@ -29,6 +29,7 @@ class BackgroundJobQueue {
     this.mbWorkers = 0;
     this.maxMbWorkers = 1;
     this.mbInterval = null;
+    this.mbPaused = false;
 
     // Wiki worker pool
     this.wikiWorkers = 0;
@@ -42,6 +43,18 @@ class BackgroundJobQueue {
 
     // processJob fn injected at startup
     this._processJobFn = null;
+  }
+
+  // ─── MB worker pause/resume for inline priority fetches ─────────────────────
+
+  pauseMbWorker() {
+    this.mbPaused = true;
+    logger.info('MB worker paused for inline priority fetch');
+  }
+
+  resumeMbWorker() {
+    this.mbPaused = false;
+    logger.info('MB worker resumed');
   }
 
   // ─── Provider availability helpers ──────────────────────────────────────────
@@ -61,6 +74,27 @@ class BackgroundJobQueue {
   }
 
   // ─── Job queuing ────────────────────────────────────────────────────────────
+
+  /**
+   * Create a job record for tracking inline (synchronous) work.
+   * Job is created with 'processing' status — not queued for background workers.
+   * Call completeJob() when done.
+   */
+  async trackJob(jobType, entityType, entityMbid) {
+    try {
+      const result = await database.query(`
+        INSERT INTO metadata_jobs (job_type, entity_type, entity_mbid, status, started_at)
+        VALUES ($1, $2, $3, 'processing', NOW())
+        ON CONFLICT (job_type, entity_mbid) DO UPDATE
+          SET status = 'processing', started_at = NOW()
+        RETURNING id
+      `, [jobType, entityType, entityMbid]);
+      return result.rows[0].id;
+    } catch (error) {
+      logger.error('Failed to track job:', error);
+      return null;
+    }
+  }
 
   async queueJob(jobType, entityType, entityMbid, priority = 0, metadata = null) {
     try {
@@ -145,7 +179,7 @@ class BackgroundJobQueue {
 
   _startMbPool(intervalMs) {
     this.mbInterval = setInterval(async () => {
-      if (this.mbWorkers >= this.maxMbWorkers) return;
+      if (this.mbPaused || this.mbWorkers >= this.maxMbWorkers) return;
       try {
         const job = await this._getNextJob(MB_JOB_TYPES);
         if (job) {

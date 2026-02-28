@@ -296,28 +296,6 @@ class ImageDownloader {
     return false;
   }
 
-  /**
-   * Queue image download job
-   * @param {number} imageId - Database image record ID
-   */
-  async queueDownload(imageId) {
-    // Import here to avoid circular dependency
-    const jobQueue = require('./jobQueue');
-    
-    // Use a dummy UUID format for entity_mbid since it's required by schema
-    // We use '00000000-0000-0000-0000-' + imageId padded to 12 chars
-    const dummyMbid = `00000000-0000-0000-0000-${String(imageId).padStart(12, '0')}`;
-    
-    await jobQueue.queueJob(
-      'download_image',        // jobType
-      'image',                 // entityType
-      dummyMbid,              // entityMbid (dummy UUID format required by schema)
-      0,                       // priority (low - don't block metadata)
-      { imageId: imageId }     // metadata
-    );
-    
-    logger.debug(`Queued download job for image ID ${imageId}`);
-  }
 }
 
 // Export singleton instance

@@ -83,6 +83,7 @@ router.get('/stats', async (req, res, next) => {
         connected: true,
         artists: parseInt(dbStats.artist_count),
         albums: parseInt(dbStats.album_count),
+        releases: parseInt(dbStats.release_count),
         tracks: parseInt(dbStats.track_count),
         size_mb: Math.round(parseInt(dbStats.db_size_bytes) / 1024 / 1024)
       },
@@ -147,8 +148,9 @@ router.get('/artist/:mbid', async (req, res, next) => {
       const ttlExpired = artist.ttl_expires_at && new Date(artist.ttl_expires_at) < now;
       
       if (ttlExpired) {
-        logger.info(`Artist ${mbid} TTL expired, refreshing from MusicBrainz`);
-        await metaHandler.refreshArtist(mbid);
+        backgroundJobQueue.queueJob('artist_full', 'artist', mbid, 5)
+          .catch(err => logger.error(`Failed to queue refresh for artist ${mbid}:`, err));
+        logger.info(`Artist ${mbid} TTL expired, queued background refresh, serving stale data`);
       }
       
       // Update access tracking
@@ -156,6 +158,13 @@ router.get('/artist/:mbid', async (req, res, next) => {
       
       // Return formatted data
       const formatted = await lidarr.formatArtist(mbid);
+
+      // Queue wiki/image jobs only when Lidarr requests this artist
+      await backgroundJobQueue.queueJob('fetch_artist_wiki', 'artist', mbid, 1);
+      if (backgroundJobQueue.hasArtistImageProvider()) {
+        await backgroundJobQueue.queueJob('fetch_artist_images', 'artist', mbid, 1);
+      }
+
       return res.json(formatted);
     }
 
@@ -163,6 +172,12 @@ router.get('/artist/:mbid', async (req, res, next) => {
     logger.info(`Artist ${mbid} not in DB, fetching from MusicBrainz`);
     await metaHandler.getArtist(mbid);
     
+    // Queue wiki/image jobs only when Lidarr requests this artist
+    await backgroundJobQueue.queueJob('fetch_artist_wiki', 'artist', mbid, 1);
+    if (backgroundJobQueue.hasArtistImageProvider()) {
+      await backgroundJobQueue.queueJob('fetch_artist_images', 'artist', mbid, 1);
+    }
+
     // Return formatted data
     const formatted = await lidarr.formatArtist(mbid);
     res.json(formatted);
@@ -177,6 +192,13 @@ router.get('/album/:mbid', async (req, res, next) => {
     const { mbid } = req.params;
 
     const formatted = await lidarr.formatAlbum(mbid);
+
+    // Queue wiki/image jobs only when Lidarr requests this album
+    await backgroundJobQueue.queueJob('fetch_album_wiki', 'release_group', mbid, 1);
+    if (backgroundJobQueue.hasAlbumImageProvider()) {
+      await backgroundJobQueue.queueJob('fetch_album_images', 'release_group', mbid, 1);
+    }
+
     res.json(formatted);
   } catch (error) {
     next(error);
@@ -246,18 +268,28 @@ router.get('/album/:provider/:id/tracks', async (req, res, next) => {
 // Configuration endpoints
 router.get('/config', (req, res) => {
   const cfg = config.getAll();
-  // Show masked API keys (first 4 chars + ***) so user knows if configured
+  // Resolve env vars so UI shows what's actually in use
+  if (cfg.providers?.musicbrainz && !cfg.providers.musicbrainz.baseUrl) {
+    cfg.providers.musicbrainz.baseUrl = process.env.MUSICBRAINZ_URL || '';
+  }
+  if (cfg.providers?.fanart && !cfg.providers.fanart.apiKey) {
+    cfg.providers.fanart.apiKey = process.env.FANART_API_KEY || '';
+  }
+  // Show masked API keys (first half + ***) so user knows if configured
   if (cfg.providers) {
     Object.keys(cfg.providers).forEach(key => {
       const provider = cfg.providers[key];
       if (provider.apiKey && provider.apiKey.length > 4) {
-        provider.apiKey = provider.apiKey.substring(0, 4) + '***';
+        const half = Math.ceil(provider.apiKey.length / 2);
+        provider.apiKey = provider.apiKey.substring(0, half) + '***';
       }
       if (provider.clientSecret && provider.clientSecret.length > 4) {
-        provider.clientSecret = provider.clientSecret.substring(0, 4) + '***';
+        const half = Math.ceil(provider.clientSecret.length / 2);
+        provider.clientSecret = provider.clientSecret.substring(0, half) + '***';
       }
       if (provider.token && provider.token.length > 4) {
-        provider.token = provider.token.substring(0, 4) + '***';
+        const half = Math.ceil(provider.token.length / 2);
+        provider.token = provider.token.substring(0, half) + '***';
       }
     });
   }
@@ -543,6 +575,55 @@ router.delete('/images/:id', async (req, res, next) => {
   }
 });
 
+// Image fetch endpoints — queue provider fetch jobs (user-uploaded images protected inside _storeImageUrls)
+router.post('/images/fetch/artist-albums/:mbid', async (req, res, next) => {
+  try {
+    const { mbid } = req.params;
+    const albums = await database.query(
+      'SELECT release_group_mbid FROM artist_release_groups WHERE artist_mbid = $1',
+      [mbid]
+    );
+    for (const row of albums.rows) {
+      await backgroundJobQueue.queueJob('fetch_album_images', 'release_group', row.release_group_mbid, 5);
+    }
+    logger.info(`Album image fetch queued for ${albums.rows.length} albums of artist ${mbid}`);
+    res.json({ success: true, queued: albums.rows.length });
+  } catch (error) { next(error); }
+});
+
+router.post('/images/fetch/artist/:mbid', async (req, res, next) => {
+  try {
+    const { mbid } = req.params;
+    await backgroundJobQueue.queueJob('fetch_artist_images', 'artist', mbid, 5);
+    logger.info(`Image fetch queued for artist ${mbid}`);
+    res.json({ success: true });
+  } catch (error) { next(error); }
+});
+
+router.post('/images/fetch/album/:mbid', async (req, res, next) => {
+  try {
+    const { mbid } = req.params;
+    await backgroundJobQueue.queueJob('fetch_album_images', 'release_group', mbid, 5);
+    logger.info(`Image fetch queued for album ${mbid}`);
+    res.json({ success: true });
+  } catch (error) { next(error); }
+});
+
+router.post('/images/fetch/all', async (req, res, next) => {
+  try {
+    const artists = await database.query('SELECT mbid FROM artists');
+    const albums = await database.query('SELECT mbid FROM release_groups');
+    for (const row of artists.rows) {
+      await backgroundJobQueue.queueJob('fetch_artist_images', 'artist', row.mbid, 5);
+    }
+    for (const row of albums.rows) {
+      await backgroundJobQueue.queueJob('fetch_album_images', 'release_group', row.mbid, 5);
+    }
+    logger.info(`Image fetch queued for ${artists.rows.length} artists and ${albums.rows.length} albums`);
+    res.json({ success: true, artists: artists.rows.length, albums: albums.rows.length });
+  } catch (error) { next(error); }
+});
+
 // Image file serving — must come AFTER specific /images/* routes to avoid route conflict
 // Regex ensures :filename must contain a dot (actual file extension) e.g. cover.jpg
 router.get('/images/:entity_type/:mbid/:filename([^/]+[.][^/]+)', async (req, res, next) => {
@@ -570,6 +651,7 @@ router.post('/ui/fetch-artist/:mbid', async (req, res, next) => {
   try {
     const { mbid } = req.params;
     await backgroundJobQueue.queueJob('artist_full', 'artist', mbid, 10);
+    await backgroundJobQueue.queueJob('fetch_artist_albums', 'artist', mbid, 9);
     logger.info(`UI artist fetch queued for ${mbid}`);
     res.json({ success: true, message: `Fetch queued for ${mbid}` });
   } catch (error) {
