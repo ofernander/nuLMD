@@ -47,8 +47,11 @@ class BulkRefresher {
       const lastRefresh = await database.getLastBulkRefresh();
 
       if (!lastRefresh) {
-        logger.info('No previous bulk refresh found, starting first bulk refresh');
-        await this.runBulkRefresh();
+        // Fresh database — don't immediately re-fetch everything.
+        // Record a synthetic bulk refresh so it waits the full interval.
+        logger.info('No previous bulk refresh found — recording baseline, will refresh after configured interval');
+        const baselineId = await database.startBulkRefresh();
+        await database.completeBulkRefresh(baselineId, 0);
         return;
       }
 
