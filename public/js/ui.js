@@ -1,12 +1,16 @@
 const JOB_LABELS = {
-    fetch_artist:        'Artist',
-    fetch_artist_albums: 'Albums',
-    fetch_release:       'Release',
-    fetch_album_full:    'Full Album',
-    artist_full:         'Artist (Full)',
+    fetch_artist:        'Artist Metadata',
+    fetch_artist_albums: 'Artist Albums',
+    fetch_artist_wiki:   'Artist Wiki',
+    fetch_artist_images: 'Artist Images',
+    fetch_release:       'Release Data',
+    fetch_album_full:    'Album Releases',
+    fetch_album_wiki:    'Album Wiki',
+    fetch_album_images:  'Album Images',
+    artist_full:         'Full Artist Fetch',
     artist_releases:     'Artist Releases',
     release_tracks:      'Track Data',
-    download_image:      'Image'
+    download_image:      'Image Download'
 };
 
 // UI management functions
@@ -155,11 +159,13 @@ const ui = {
                     html += '</label>';
                     html += '</div>';
                     
-                    // API Key if exists
-                    if (settings.apiKey !== undefined) {
+                    // API Key field — show for any provider that has apiKey, token, or clientSecret in config,
+                    // or for known providers that need keys
+                    const needsApiKey = ['fanart', 'lastfm', 'discogs'];
+                    if (settings.apiKey !== undefined || needsApiKey.includes(name)) {
                         html += '<div class="form-group">';
                         html += `<label for="providers.${name}.apiKey">API Key</label>`;
-                        const displayValue = settings.apiKey && settings.apiKey !== '' ? '***' : '';
+                        const displayValue = settings.apiKey && settings.apiKey !== '' ? settings.apiKey : '';
                         html += `<input type="text" class="form-control" id="providers.${name}.apiKey" value="${displayValue}" placeholder="Enter API key">`;
                         html += '</div>';
                     }
@@ -277,14 +283,13 @@ const ui = {
 
             container.innerHTML = html;
 
-            // Sort alphabetically before storing
+            // Sort alphabetically and rebuild
             artists.sort((a, b) => (a.name || '').toLowerCase().localeCompare((b.name || '').toLowerCase()));
-
-            // Store artists data - always reset sort to alphabetical on load
             this.metadataArtists = artists;
             this.metadataSort = { column: 'name', direction: 'asc' };
             this.currentAlbumTypeFilter = this.currentAlbumTypeFilter || 'Album';
             this.currentReleaseStatusFilter = this.currentReleaseStatusFilter || 'Official';
+            this.rebuildMetadataTable();
 
         } catch (error) {
             console.error('Failed to load metadata tree:', error);
@@ -685,7 +690,7 @@ const ui = {
                     <span class="expand-icon" onclick="ui.toggleArtistExpand('${artist.mbid}')">▶</span>
                     ${this.escapeHtml(artist.name)}
                 </td>
-                <td><span class="mbid-copy" onclick="event.stopPropagation(); ui.copyToClipboard('${artist.mbid}')" title="Click to copy MBID">${artist.mbid.substring(0, 8)}...</span></td>
+                <td><a href="https://musicbrainz.org/artist/${artist.mbid}" target="_blank" class="mbid-link" onclick="event.stopPropagation()" title="View on MusicBrainz">${artist.mbid.substring(0, 8)}...</a></td>
                 <td>${artist.type || '-'}</td>
                 <td>${artist.country || '-'}</td>
                 <td>${artist.album_count}</td>
@@ -867,15 +872,15 @@ const ui = {
                 } else if (input.type === 'number') {
                     config.providers[providerName][key] = parseFloat(input.value);
                 } else {
-                    // Don't save masked values
-                    if (input.value !== '***' && input.value !== '') {
+                    // Don't save masked values (contain ***)
+                    if (input.value && !input.value.endsWith('***') && input.value !== '') {
                         config.providers[providerName][key] = input.value;
                     }
                 }
             });
 
             await api.updateConfig(config);
-            this.showSuccess('Metadata sources saved. Changes take effect immediately.');
+            this.showSuccess('Metadata Changes Require Server Restart');
         } catch (error) {
             console.error('Failed to save metadata sources:', error);
             this.showError('Failed to save metadata sources');
@@ -1452,13 +1457,22 @@ const ui = {
 
     showMessage(message, type) {
         const alertDiv = document.createElement('div');
-        alertDiv.className = `alert alert-${type}`;
+        alertDiv.className = `alert alert-${type} toast-notification`;
         alertDiv.textContent = message;
         alertDiv.style.position = 'fixed';
-        alertDiv.style.top = '20px';
         alertDiv.style.right = '20px';
         alertDiv.style.zIndex = '1000';
         alertDiv.style.maxWidth = '400px';
+
+        // Stack below existing toasts
+        const existing = document.querySelectorAll('.toast-notification');
+        let topOffset = 20;
+        existing.forEach(el => {
+            const rect = el.getBoundingClientRect();
+            const bottom = rect.top + rect.height + 10;
+            if (bottom > topOffset) topOffset = bottom;
+        });
+        alertDiv.style.top = topOffset + 'px';
 
         document.body.appendChild(alertDiv);
 

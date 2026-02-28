@@ -268,18 +268,28 @@ router.get('/album/:provider/:id/tracks', async (req, res, next) => {
 // Configuration endpoints
 router.get('/config', (req, res) => {
   const cfg = config.getAll();
-  // Show masked API keys (first 4 chars + ***) so user knows if configured
+  // Resolve env vars so UI shows what's actually in use
+  if (cfg.providers?.musicbrainz && !cfg.providers.musicbrainz.baseUrl) {
+    cfg.providers.musicbrainz.baseUrl = process.env.MUSICBRAINZ_URL || '';
+  }
+  if (cfg.providers?.fanart && !cfg.providers.fanart.apiKey) {
+    cfg.providers.fanart.apiKey = process.env.FANART_API_KEY || '';
+  }
+  // Show masked API keys (first half + ***) so user knows if configured
   if (cfg.providers) {
     Object.keys(cfg.providers).forEach(key => {
       const provider = cfg.providers[key];
       if (provider.apiKey && provider.apiKey.length > 4) {
-        provider.apiKey = provider.apiKey.substring(0, 4) + '***';
+        const half = Math.ceil(provider.apiKey.length / 2);
+        provider.apiKey = provider.apiKey.substring(0, half) + '***';
       }
       if (provider.clientSecret && provider.clientSecret.length > 4) {
-        provider.clientSecret = provider.clientSecret.substring(0, 4) + '***';
+        const half = Math.ceil(provider.clientSecret.length / 2);
+        provider.clientSecret = provider.clientSecret.substring(0, half) + '***';
       }
       if (provider.token && provider.token.length > 4) {
-        provider.token = provider.token.substring(0, 4) + '***';
+        const half = Math.ceil(provider.token.length / 2);
+        provider.token = provider.token.substring(0, half) + '***';
       }
     });
   }
