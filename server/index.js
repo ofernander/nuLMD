@@ -16,7 +16,7 @@ const { initializeProviders } = require('./lib/providerRegistry');
 const backgroundJobQueue = require('./lib/backgroundJobQueue');
 const { processJob } = require('./lib/jobProcessor');
 const imageDownloadQueue = require('./lib/imageDownloadQueue');
-const bulkRefresher = require('./lib/bulkRefresher');
+const lidarrClient = require('./lib/lidarrClient');
 
 const app = express();
 const PORT = process.env.PORT || 5001;
@@ -62,8 +62,18 @@ app.get('/artist/:mbid', async (req, res) => {
     logger.info(`Lidarr artist request: ${mbid}`);
     const formatted = await metaHandler.ensureArtist(mbid);
 
-    // Queue wiki/image jobs — Lidarr explicitly requested this artist
-    backgroundJobQueue.queueJob('fetch_artist_wiki', 'artist', mbid, 1);
+    const artistCheck = await database.getArtist(mbid);
+    if (artistCheck && !artistCheck.overview) {
+      const wikiDone = await database.query(
+        `SELECT 1 FROM metadata_jobs WHERE job_type = 'fetch_artist_wiki' AND entity_mbid = $1 AND status = 'completed' LIMIT 1`,
+        [mbid]
+      );
+      if (wikiDone.rows.length === 0) {
+        backgroundJobQueue.queueJob('fetch_artist_wiki', 'artist', mbid, 1);
+      } else {
+        logger.info(`Wiki already fetched for artist ${mbid}, skipping`);
+      }
+    }
     if (backgroundJobQueue.hasArtistImageProvider()) {
       backgroundJobQueue.queueJob('fetch_artist_images', 'artist', mbid, 1);
     }
@@ -85,8 +95,18 @@ app.get('/album/:mbid', async (req, res) => {
     logger.info(`Lidarr album request: ${mbid}`);
     const formatted = await metaHandler.ensureAlbum(mbid);
 
-    // Queue wiki/image jobs — Lidarr explicitly requested this album
-    backgroundJobQueue.queueJob('fetch_album_wiki', 'release_group', mbid, 1);
+    const albumCheck = await database.getReleaseGroup(mbid);
+    if (albumCheck && !albumCheck.overview) {
+      const wikiDone = await database.query(
+        `SELECT 1 FROM metadata_jobs WHERE job_type = 'fetch_album_wiki' AND entity_mbid = $1 AND status = 'completed' LIMIT 1`,
+        [mbid]
+      );
+      if (wikiDone.rows.length === 0) {
+        backgroundJobQueue.queueJob('fetch_album_wiki', 'release_group', mbid, 1);
+      } else {
+        logger.info(`Wiki already fetched for album ${mbid}, skipping`);
+      }
+    }
     if (backgroundJobQueue.hasAlbumImageProvider()) {
       backgroundJobQueue.queueJob('fetch_album_images', 'release_group', mbid, 1);
     }
@@ -209,9 +229,17 @@ async function start() {
     await imageDownloadQueue.startProcessor(500);
     logger.info('Image download queue processor started');
 
-    // Start bulk refresh scheduler (runs daily at 3am)
-    bulkRefresher.start();
-    logger.info('Bulk refresh scheduler started');
+    // Initialize Lidarr integration client
+    lidarrClient.initialize();
+    if (lidarrClient.enabled) {
+      const result = await lidarrClient.testConnection();
+      if (result.success) {
+        logger.info(`Lidarr integration active — Lidarr v${result.version}`);
+        await lidarrClient.refreshArtistMap();
+      } else {
+        logger.warn(`Lidarr integration enabled but connection failed: ${result.error}`);
+      }
+    }
 
     // Start listening
     app.listen(PORT, () => {
@@ -232,7 +260,6 @@ process.on('SIGTERM', () => {
   logger.info('SIGTERM received, shutting down gracefully');
   backgroundJobQueue.stopProcessor();
   imageDownloadQueue.stopProcessor();
-  bulkRefresher.stop();
   process.exit(0);
 });
 
@@ -240,7 +267,6 @@ process.on('SIGINT', () => {
   logger.info('SIGINT received, shutting down gracefully');
   backgroundJobQueue.stopProcessor();
   imageDownloadQueue.stopProcessor();
-  bulkRefresher.stop();
   process.exit(0);
 });
 

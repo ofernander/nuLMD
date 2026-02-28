@@ -1,6 +1,7 @@
 const { registry } = require('./providerRegistry');
 const metaHandler = require('./metaHandler');
 const { logger } = require('./logger');
+const lidarrClient = require('./lidarrClient');
 
 const MAX_ITEM_RETRIES = 10;
 
@@ -316,6 +317,16 @@ async function fetchArtistAlbums(artistMbid) {
   }
 
   logger.info(`Background: completed fetching releases for artist ${artistMbid}: ${fetched} albums processed, ${failedAlbums.length} failed`);
+
+  // Trigger Lidarr to re-read metadata for this artist
+  if (lidarrClient.enabled) {
+    const result = await lidarrClient.refreshArtistByMbid(artistMbid);
+    if (result.success) {
+      logger.info(`Lidarr refresh triggered for artist ${artistMbid} — command ID ${result.commandId}`);
+    } else if (!result.skipped) {
+      logger.warn(`Lidarr refresh failed for artist ${artistMbid}: ${result.error}`);
+    }
+  }
 }
 
 /**

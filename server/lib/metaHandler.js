@@ -79,9 +79,8 @@ class ArtistService {
   }
   
   async storeArtist(mbid, data, isFullData = false) {
-    const config = require('./config');
     const now = new Date();
-    const ttlDays = config.get('refresh.artistTTL', 7);
+    const ttlDays = 30;
     const ttlExpires = new Date(now.getTime() + (ttlDays * 24 * 60 * 60 * 1000));
     
     // Extract fields - handle both search results and full artist data
@@ -279,9 +278,8 @@ class ArtistService {
   }
   
   async storeReleaseGroup(mbid, data, artistMbid, { force = false } = {}) {
-    const config = require('./config');
     const now = new Date();
-    const ttlDays = config.get('refresh.artistTTL', 7);
+    const ttlDays = 30;
     const ttlExpires = new Date(now.getTime() + (ttlDays * 24 * 60 * 60 * 1000));
     
     // Normalize partial dates for Postgres (YYYY -> YYYY-01-01, YYYY-MM -> YYYY-MM-01)
