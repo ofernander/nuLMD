@@ -563,6 +563,11 @@ class ArtistService {
    * Used when TTL expires or manual refresh requested
    */
   async refreshArtist(mbid) {
+    const existing = await database.getArtist(mbid);
+    if (existing && existing.ttl_expires_at && new Date(existing.ttl_expires_at) > new Date()) {
+      logger.info(`Artist ${mbid} within TTL, skipping refresh`);
+      return;
+    }
     logger.info(`Refreshing artist ${mbid} from MusicBrainz (TTL expired or manual refresh)`);
     
     const mbProvider = registry.getProvider('musicbrainz');
