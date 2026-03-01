@@ -4,6 +4,7 @@ const MusicBrainzProvider = require('../providers/musicbrainz');
 const WikipediaProvider = require('../providers/wikipedia');
 const CoverArtArchiveProvider = require('../providers/coverartarchive');
 const FanartTVProvider = require('../providers/fanart');
+const DeezerProvider = require('../providers/deezer');
 
 class ProviderRegistry {
   constructor() {
@@ -27,7 +28,8 @@ class ProviderRegistry {
       musicbrainz: MusicBrainzProvider,
       wikipedia: WikipediaProvider,
       coverartarchive: CoverArtArchiveProvider,
-      fanart: FanartTVProvider
+      fanart: FanartTVProvider,
+      deezer: DeezerProvider
     };
 
     for (const [name, ProviderClass] of Object.entries(providerClasses)) {

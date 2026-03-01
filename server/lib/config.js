@@ -53,11 +53,14 @@ class Config {
           enabled: true  // No API key needed!
         },
         coverartarchive: {
-          enabled: false  // Album cover downloads - default OFF (Lidarr handles this)
+          enabled: true  // Album covers from MusicBrainz/Internet Archive
         },
         fanart: {
           enabled: !!process.env.FANART_API_KEY,  // Auto-enable if API key in environment
           apiKey: process.env.FANART_API_KEY || ''  // Get free key from https://fanart.tv/get-an-api-key/
+        },
+        deezer: {
+          enabled: true  // Free, no API key needed
         }
         // lastfm: {
         //   enabled: false,

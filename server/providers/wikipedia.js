@@ -32,25 +32,43 @@ class WikipediaProvider extends BaseProvider {
     return this.cachedRequest(cacheKey, async () => {
       let pageTitle = null;
       
-      // Try to get Wikipedia page title from Wikidata ID
+      // 1. Try Wikidata ID (most reliable — links directly to correct article)
       if (wikidataId) {
         pageTitle = await this.getPageTitleFromWikidata(wikidataId);
       }
       
-      // Fallback: Search by artist name with disambiguation retry
+      // 2. Search by name with music-aware ranking
       if (!pageTitle && artistName) {
-        pageTitle = await this.searchPageByName(artistName);
+        pageTitle = await this.searchPageByName(artistName, true);
         
-        // If we got a page, check if it's a disambiguation page
         if (pageTitle) {
           const intro = await this.getPageIntro(pageTitle);
           
-          // If disambiguation detected, retry with type-based suffix
-          if (!intro && artistType) {
+          if (!intro) {
+            // Disambiguation page — try type-based suffix
             const suffix = artistType === 'Group' ? ' (band)' : ' (musician)';
             logger.debug(`Wikipedia: Retrying search with suffix "${suffix}"`);
-            pageTitle = await this.searchPageByName(artistName + suffix);
+            pageTitle = await this.searchPageByName(artistName + suffix, false);
+            if (!pageTitle) return null;
+            return await this.getPageIntro(pageTitle);
           }
+          
+          // Got content — check if it's actually about music
+          if (!this._looksLikeMusic(intro)) {
+            logger.debug(`Wikipedia: "${pageTitle}" doesn't appear music-related, retrying with suffix`);
+            const suffix = artistType === 'Group' ? ' (band)' : ' (musician)';
+            const altTitle = await this.searchPageByName(artistName + suffix, false);
+            if (altTitle) {
+              const altIntro = await this.getPageIntro(altTitle);
+              if (altIntro && this._looksLikeMusic(altIntro)) {
+                return altIntro;
+              }
+            }
+            // Suffixed search failed — return original (better than nothing)
+            return intro;
+          }
+          
+          return intro;
         }
       }
       
@@ -104,7 +122,7 @@ class WikipediaProvider extends BaseProvider {
    * @param {string} artistName
    * @returns {Promise<string|null>}
    */
-  async searchPageByName(artistName) {
+  async searchPageByName(artistName, preferMusic = false) {
     try {
       logger.debug(`Wikipedia: Searching for page by name "${artistName}"`);
       
@@ -112,19 +130,37 @@ class WikipediaProvider extends BaseProvider {
         params: {
           action: 'opensearch',
           search: artistName,
-          limit: 1,
+          limit: 10,
           format: 'json'
         }
       });
       
       // OpenSearch returns: [query, [titles], [descriptions], [urls]]
-      if (response.data[1] && response.data[1].length > 0) {
-        const title = response.data[1][0];
-        logger.debug(`Wikipedia: Found page "${title}" for "${artistName}"`);
-        return title;
+      const titles = response.data[1];
+      if (!titles?.length) return null;
+
+      if (!preferMusic) {
+        logger.debug(`Wikipedia: Found page "${titles[0]}" for "${artistName}"`);
+        return titles[0];
       }
+
+      // Score titles for music relevance — prefer pages with music-related suffixes
+      const musicSuffixes = ['(band)', '(musician)', '(singer)', '(rapper)',
+        '(songwriter)', '(artist)', '(group)', '(duo)', '(trio)',
+        '(album)', '(ep)', '(song)', '(musical project)'];
       
-      return null;
+      const lower = artistName.toLowerCase();
+      for (const title of titles) {
+        const titleLower = title.toLowerCase();
+        if (musicSuffixes.some(s => titleLower === `${lower} ${s}`)) {
+          logger.debug(`Wikipedia: Preferred music page "${title}" for "${artistName}"`);
+          return title;
+        }
+      }
+
+      // No music-suffixed match, return first result
+      logger.debug(`Wikipedia: No music-specific page found, using "${titles[0]}" for "${artistName}"`);
+      return titles[0];
     } catch (error) {
       logger.error(`Wikipedia: Failed to search for "${artistName}":`, error.message);
       return null;
@@ -228,6 +264,25 @@ class WikipediaProvider extends BaseProvider {
    * @param {Array} relations - MusicBrainz relations array
    * @returns {string|null}
    */
+  /**
+   * Check if text appears to be about music (artist/band/album)
+   * @param {string} text
+   * @returns {boolean}
+   */
+  _looksLikeMusic(text) {
+    if (!text) return false;
+    const sample = text.substring(0, 500).toLowerCase();
+    const musicTerms = [
+      'band', 'musician', 'singer', 'songwriter', 'rapper', 'vocalist',
+      'album', 'song', 'record', 'music', 'genre', 'rock', 'pop', 'hip hop',
+      'metal', 'jazz', 'punk', 'electronic', 'folk', 'country', 'blues',
+      'guitar', 'bass', 'drums', 'vocals', 'label', 'tour', 'concert',
+      'ep', 'single', 'track', 'studio', 'debut', 'discography',
+      'formed in', 'formed by', 'solo artist', 'musical'
+    ];
+    return musicTerms.some(term => sample.includes(term));
+  }
+
   static extractWikidataId(relations) {
     if (!Array.isArray(relations)) return null;
     

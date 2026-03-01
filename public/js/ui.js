@@ -1,16 +1,16 @@
 const JOB_LABELS = {
     fetch_artist:        'Artist Metadata',
     fetch_artist_albums: 'Artist Albums',
-    fetch_artist_wiki:   'Artist Wiki',
+    fetch_artist_wiki:   'Artist Bio',
     fetch_artist_images: 'Artist Images',
     fetch_release:       'Release Data',
     fetch_album_full:    'Album Releases',
-    fetch_album_wiki:    'Album Wiki',
+    fetch_album_wiki:    'Album Bio',
     fetch_album_images:  'Album Images',
     artist_full:         'Full Artist Fetch',
     artist_releases:     'Artist Releases',
     release_tracks:      'Track Data',
-    download_image:      'Image Download'
+    image_download:      'Image Download'
 };
 
 // UI management functions
@@ -39,6 +39,7 @@ const ui = {
                 coverartarchive: 'https://musicbrainz.org/static/images/favicons/favicon-32x32.png',
                 theaudiodb: 'https://www.theaudiodb.com/images/favicon.ico',
                 fanart: 'https://fanart.tv/favicon.ico',
+                deezer: 'https://www.deezer.com/favicon.ico',
                 //lastfm: 'https://www.last.fm/static/images/favicon.ico',
                 //discogs: 'https://www.discogs.com/favicon.ico'
             };

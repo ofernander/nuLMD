@@ -618,7 +618,7 @@ router.post('/images/fetch/artist-albums/:mbid', async (req, res, next) => {
       [mbid]
     );
     for (const row of albums.rows) {
-      await backgroundJobQueue.queueJob('fetch_album_images', 'release_group', row.release_group_mbid, 5);
+      await backgroundJobQueue.forceQueueJob('fetch_album_images', 'release_group', row.release_group_mbid, 5);
     }
     logger.info(`Album image fetch queued for ${albums.rows.length} albums of artist ${mbid}`);
     res.json({ success: true, queued: albums.rows.length });
@@ -628,7 +628,7 @@ router.post('/images/fetch/artist-albums/:mbid', async (req, res, next) => {
 router.post('/images/fetch/artist/:mbid', async (req, res, next) => {
   try {
     const { mbid } = req.params;
-    await backgroundJobQueue.queueJob('fetch_artist_images', 'artist', mbid, 5);
+    await backgroundJobQueue.forceQueueJob('fetch_artist_images', 'artist', mbid, 5);
     logger.info(`Image fetch queued for artist ${mbid}`);
     res.json({ success: true });
   } catch (error) { next(error); }
@@ -637,7 +637,7 @@ router.post('/images/fetch/artist/:mbid', async (req, res, next) => {
 router.post('/images/fetch/album/:mbid', async (req, res, next) => {
   try {
     const { mbid } = req.params;
-    await backgroundJobQueue.queueJob('fetch_album_images', 'release_group', mbid, 5);
+    await backgroundJobQueue.forceQueueJob('fetch_album_images', 'release_group', mbid, 5);
     logger.info(`Image fetch queued for album ${mbid}`);
     res.json({ success: true });
   } catch (error) { next(error); }
@@ -648,10 +648,10 @@ router.post('/images/fetch/all', async (req, res, next) => {
     const artists = await database.query('SELECT mbid FROM artists');
     const albums = await database.query('SELECT mbid FROM release_groups');
     for (const row of artists.rows) {
-      await backgroundJobQueue.queueJob('fetch_artist_images', 'artist', row.mbid, 5);
+      await backgroundJobQueue.forceQueueJob('fetch_artist_images', 'artist', row.mbid, 5);
     }
     for (const row of albums.rows) {
-      await backgroundJobQueue.queueJob('fetch_album_images', 'release_group', row.mbid, 5);
+      await backgroundJobQueue.forceQueueJob('fetch_album_images', 'release_group', row.mbid, 5);
     }
     logger.info(`Image fetch queued for ${artists.rows.length} artists and ${albums.rows.length} albums`);
     res.json({ success: true, artists: artists.rows.length, albums: albums.rows.length });
