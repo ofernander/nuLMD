@@ -31,19 +31,11 @@ app.use(express.urlencoded({ extended: true }));
 
 // Request logging (filter out noisy endpoints)
 app.use((req, res, next) => {
-  // Skip logging for high-frequency polling endpoints
-  const skipPaths = [
-    '/api/logs/tail',
-    '/health',
-    '/api/version',
-    '/api/cache/stats',
-    '/api/stats',
-    '/api/config',
-    '/api/jobs/recent',
-    '/api/providers'
-  ];
+  // Only log non-browser requests (Lidarr, curl, API clients)
+  // All browsers include 'Mozilla' in UA due to 1990s compat legacy
+  const isWebApp = (req.headers['user-agent'] || '').includes('Mozilla');
   
-  if (!skipPaths.includes(req.path)) {
+  if (!isWebApp) {
     logger.info(`${req.method} ${req.path}`, {
       ip: req.ip,
       userAgent: req.get('user-agent')

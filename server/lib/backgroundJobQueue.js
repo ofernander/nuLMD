@@ -104,8 +104,12 @@ class BackgroundJobQueue {
         ON CONFLICT (job_type, entity_mbid) DO UPDATE
           SET priority = GREATEST(metadata_jobs.priority, EXCLUDED.priority),
               status = CASE
-                WHEN metadata_jobs.status = 'failed' THEN 'pending'
-                ELSE metadata_jobs.status
+                WHEN metadata_jobs.status = 'processing' THEN metadata_jobs.status
+                ELSE 'pending'
+              END,
+              attempts = CASE
+                WHEN metadata_jobs.status = 'processing' THEN metadata_jobs.attempts
+                ELSE 0
               END
         RETURNING id
       `, [jobType, entityType, entityMbid, priority, metadata ? JSON.stringify(metadata) : null]);

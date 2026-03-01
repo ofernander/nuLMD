@@ -984,7 +984,7 @@ const ui = {
             const response = await fetch('/api/metadata/artists');
             this.imageArtists = await response.json();
             this.imageArtists.sort((a, b) => a.name.localeCompare(b.name));
-            this._renderImageArtistList(this.imageArtists);
+            this.filterImageArtistList();
         } catch (e) {
             listEl.innerHTML = '<p style="color: var(--text-secondary);">Failed to load artists</p>';
         }
@@ -1411,7 +1411,6 @@ const ui = {
     },
 
     async refreshArtistImages(mbid) {
-        if (!confirm('Re-fetch images for this artist? User-uploaded images will not be affected.')) return;
         try {
             await fetch(`/api/images/fetch/artist/${mbid}`, { method: 'POST' });
             this.showSuccess('Image fetch queued');
@@ -1421,7 +1420,6 @@ const ui = {
     },
 
     async refreshAlbumImages(mbid) {
-        if (!confirm('Re-fetch images for this album? User-uploaded images will not be affected.')) return;
         try {
             await fetch(`/api/images/fetch/album/${mbid}`, { method: 'POST' });
             this.showSuccess('Image fetch queued');
