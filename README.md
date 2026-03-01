@@ -1,6 +1,6 @@
 # nuLMD
 
-Metadata manager/proxy server for Lidarr
+Metadata manager & proxy server for Lidarr
 
 ![nuLMD](/public/assets/project_screen.png)
 
