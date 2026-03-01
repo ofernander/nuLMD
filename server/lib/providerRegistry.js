@@ -32,9 +32,17 @@ class ProviderRegistry {
       deezer: DeezerProvider
     };
 
+    // Providers that are enabled by default (no API key needed)
+    const enabledByDefault = ['coverartarchive', 'deezer'];
+
     for (const [name, ProviderClass] of Object.entries(providerClasses)) {
       let providerConfig = providerConfigs[name] || {};
-      
+
+      // Enable by default if no config exists and provider doesn't need a key
+      if (!providerConfigs[name] && enabledByDefault.includes(name)) {
+        providerConfig = { enabled: true };
+      }
+
       // Special handling for Fanart: prioritize environment variable
       if (name === 'fanart' && process.env.FANART_API_KEY) {
         providerConfig = {

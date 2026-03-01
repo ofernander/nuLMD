@@ -564,6 +564,23 @@ class BackgroundJobQueue {
     if (result.rows.length > 0) {
       logger.info(`Reset ${result.rows.length} stuck jobs to pending`);
     }
+
+    // Reset completed image jobs that have no cached images — allows re-fetch
+    // when new providers are added or previous attempts found nothing
+    const imageReset = await database.query(`
+      UPDATE metadata_jobs SET status = 'pending', attempts = 0, started_at = NULL
+      WHERE job_type IN ('fetch_artist_images', 'fetch_album_images')
+        AND status = 'completed'
+        AND NOT EXISTS (
+          SELECT 1 FROM images
+          WHERE images.entity_mbid = metadata_jobs.entity_mbid
+            AND images.cached = true
+        )
+      RETURNING id
+    `);
+    if (imageReset.rows.length > 0) {
+      logger.info(`Reset ${imageReset.rows.length} completed image jobs with no cached images to pending`);
+    }
   }
 
   async _cleanupOldJobs() {
