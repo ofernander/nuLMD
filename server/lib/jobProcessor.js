@@ -124,6 +124,12 @@ async function fetchArtistFull(artistMbid) {
  * Now with delta updates - only fetches NEW releases
  */
 async function fetchArtistReleases(artistMbid, metadata) {
+  const BLOCKED = new Set(['89ad4ac3-39f7-470e-963a-56509c546377', 'fe5b7087-438f-4e6e-bf3d-4a5b65e8d8b6']);
+  if (BLOCKED.has(artistMbid)) {
+    logger.info(`fetchArtistReleases: skipping blocked entity ${artistMbid}`);
+    return;
+  }
+
   const database = require('../sql/database');
   const mbProvider = registry.getProvider('musicbrainz');
   
@@ -268,11 +274,24 @@ async function fetchArtistBasic(artistMbid) {
  * Fetch all albums for an artist
  */
 async function fetchArtistAlbums(artistMbid) {
+  const BLOCKED = new Set(['89ad4ac3-39f7-470e-963a-56509c546377', 'fe5b7087-438f-4e6e-bf3d-4a5b65e8d8b6']);
+  if (BLOCKED.has(artistMbid)) {
+    logger.info(`fetchArtistAlbums: skipping blocked entity ${artistMbid}`);
+    return;
+  }
+
   const mbProvider = registry.getProvider('musicbrainz');
   const database = require('../sql/database');
 
   // Get all release groups already stored for this artist
   const releaseGroups = await metaHandler.getArtistReleaseGroups(artistMbid);
+
+  // Safety: refuse to process artists with absurd album counts
+  if (releaseGroups.length > 500) {
+    logger.warn(`fetchArtistAlbums: artist ${artistMbid} has ${releaseGroups.length} release groups, exceeds safety limit of 500, skipping`);
+    return;
+  }
+
   logger.info(`Background: artist ${artistMbid} has ${releaseGroups.length} release groups, checking for missing releases`);
 
   let fetched = 0;

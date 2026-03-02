@@ -408,6 +408,9 @@ class BackgroundJobQueue {
   }
 
   async _fetchArtistImages(mbid) {
+    const BLOCKED = new Set(['89ad4ac3-39f7-470e-963a-56509c546377', 'fe5b7087-438f-4e6e-bf3d-4a5b65e8d8b6']);
+    if (BLOCKED.has(mbid)) return;
+
     const result = await database.query('SELECT name FROM artists WHERE mbid = $1', [mbid]);
     if (!result.rows[0]) return;
 

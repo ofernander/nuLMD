@@ -20,6 +20,12 @@ const ALBUM_IMAGE_TYPES  = ['Cover', 'Disc', 'Clearart'];
 const MIME_TO_EXT = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif' };
 const IMAGES_BASE = path.join(__dirname, '../../data/images');
 
+// MusicBrainz special entities — never fully fetch these
+const BLOCKED_ARTIST_MBIDS = new Set([
+  '89ad4ac3-39f7-470e-963a-56509c546377', // Various Artists
+  'fe5b7087-438f-4e6e-bf3d-4a5b65e8d8b6', // Various Artists (alt)
+]);
+
 // API version
 router.get('/version', (req, res) => {
   res.json({
@@ -139,6 +145,16 @@ router.get('/search/artist', async (req, res, next) => {
 router.get('/artist/:mbid', async (req, res, next) => {
   try {
     const { mbid } = req.params;
+
+    // Block special MusicBrainz entities from full processing
+    if (BLOCKED_ARTIST_MBIDS.has(mbid)) {
+      logger.info(`Blocked artist ${mbid} (special MB entity), returning minimal response`);
+      const formatted = await lidarr.formatArtist(mbid).catch(() => ({
+        Id: mbid, ArtistName: 'Various Artists', Status: 'active',
+        Images: [], Albums: [], Links: [], Genres: [], Tags: []
+      }));
+      return res.json(formatted);
+    }
 
     // Check if we have the artist in DB
     const artist = await database.getArtist(mbid);
