@@ -1,6 +1,6 @@
 # nuLMD
 
-Metadata proxy server for Lidarr
+Metadata manager & proxy server for Lidarr
 
 ![nuLMD](/public/assets/project_screen.png)
 
@@ -57,6 +57,8 @@ services:
       - POSTGRES_DB=nulmd
       - POSTGRES_USER=nulmd
       - POSTGRES_PASSWORD=changeme
+      - LIDARR_URL=http://<lidarr-URL>:8686
+      - LIDARR_API_KEY=
       - FANART_API_KEY=
     restart: unless-stopped
     depends_on:
@@ -154,6 +156,8 @@ services:
       - POSTGRES_USER=nulmd
       - POSTGRES_PASSWORD=changeme
       - POSTGRES_DB=nulmd
+      - LIDARR_URL=http://lidarr:8686
+      - LIDARR_API_KEY=
       - FANART_API_KEY=
     restart: unless-stopped
     depends_on:
@@ -220,6 +224,8 @@ networks:
 - POSTGRES_DB=nulmd
 - POSTGRES_USER=nulmd
 - POSTGRES_PASSWORD=password
+- LIDARR_URL=http://lidarr:8686
+- LIDARR_API_KEY=
 - MUSICBRAINZ_URL=
 - MUSICBRAINZ_RATE_LIMIT=
 - FANART_API_KEY=

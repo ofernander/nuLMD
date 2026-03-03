@@ -19,6 +19,7 @@ class ImageDownloadQueue {
       'coverartarchive': 2500,  // 2.5s - conservative for 30 req/min limit
       'theaudiodb': 1000,       // 1s - conservative
       'fanart': 500,            // 0.5s - they allow 2 req/s
+      'deezer': 1000,           // 1s - conservative for free tier
       'default': 1000           // 1s default for unknown providers
     };
   }

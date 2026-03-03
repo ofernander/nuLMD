@@ -104,17 +104,49 @@ class BackgroundJobQueue {
         ON CONFLICT (job_type, entity_mbid) DO UPDATE
           SET priority = GREATEST(metadata_jobs.priority, EXCLUDED.priority),
               status = CASE
-                WHEN metadata_jobs.status = 'failed' THEN 'pending'
-                ELSE metadata_jobs.status
+                WHEN metadata_jobs.status = 'processing' THEN metadata_jobs.status
+                WHEN metadata_jobs.status = 'completed' THEN metadata_jobs.status
+                ELSE 'pending'
+              END,
+              attempts = CASE
+                WHEN metadata_jobs.status = 'processing' THEN metadata_jobs.attempts
+                WHEN metadata_jobs.status = 'completed' THEN metadata_jobs.attempts
+                ELSE 0
               END
+        RETURNING id, status
+      `, [jobType, entityType, entityMbid, priority, metadata ? JSON.stringify(metadata) : null]);
+
+      const { id: jobId, status } = result.rows[0];
+      if (status !== 'completed') {
+        logger.info(`Queued job ${jobId}: ${jobType} for ${entityType} ${entityMbid}`);
+      }
+      return jobId;
+    } catch (error) {
+      logger.error('Failed to queue job:', error);
+      throw error;
+    }
+  }
+
+  async forceQueueJob(jobType, entityType, entityMbid, priority = 0, metadata = null) {
+    try {
+      const result = await database.query(`
+        INSERT INTO metadata_jobs (job_type, entity_type, entity_mbid, priority, metadata)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (job_type, entity_mbid) DO UPDATE
+          SET priority = GREATEST(metadata_jobs.priority, EXCLUDED.priority),
+              status = CASE
+                WHEN metadata_jobs.status = 'processing' THEN metadata_jobs.status
+                ELSE 'pending'
+              END,
+              attempts = 0
         RETURNING id
       `, [jobType, entityType, entityMbid, priority, metadata ? JSON.stringify(metadata) : null]);
 
       const jobId = result.rows[0].id;
-      logger.info(`Queued job ${jobId}: ${jobType} for ${entityType} ${entityMbid}`);
+      logger.info(`Force-queued job ${jobId}: ${jobType} for ${entityType} ${entityMbid}`);
       return jobId;
     } catch (error) {
-      logger.error('Failed to queue job:', error);
+      logger.error('Failed to force-queue job:', error);
       throw error;
     }
   }
@@ -265,6 +297,17 @@ class BackgroundJobQueue {
     if (overview) {
       await database.query('UPDATE artists SET overview = $1 WHERE mbid = $2', [overview, mbid]);
       logger.info(`Wiki: Stored artist overview for ${mbid} (${overview.length} chars)`);
+      return;
+    }
+
+    // Fallback: try Deezer bio
+    const deezerProvider = registry.getProvider('deezer');
+    if (deezerProvider) {
+      const bio = await deezerProvider.getArtistBio(artist.name);
+      if (bio) {
+        await database.query('UPDATE artists SET overview = $1 WHERE mbid = $2', [bio, mbid]);
+        logger.info(`Deezer: Stored artist bio for ${mbid} (${bio.length} chars)`);
+      }
     }
   }
 
@@ -354,7 +397,10 @@ class BackgroundJobQueue {
         INSERT INTO images (entity_type, entity_mbid, url, cover_type, provider, last_verified_at)
         VALUES ($1, $2, $3, $4, $5, NOW())
         ON CONFLICT (entity_mbid, cover_type, provider) DO UPDATE
-          SET url = EXCLUDED.url, last_verified_at = NOW(), cached = false, cache_failed = false
+          SET url = EXCLUDED.url,
+              last_verified_at = NOW(),
+              cached = CASE WHEN images.url = EXCLUDED.url THEN images.cached ELSE false END,
+              cache_failed = CASE WHEN images.url = EXCLUDED.url THEN images.cache_failed ELSE false END
       `, [entityType, entityMbid, image.Url, image.CoverType, image.Provider || provider]);
       stored++;
     }
@@ -362,19 +408,56 @@ class BackgroundJobQueue {
   }
 
   async _fetchArtistImages(mbid) {
+    const BLOCKED = new Set(['89ad4ac3-39f7-470e-963a-56509c546377', 'fe5b7087-438f-4e6e-bf3d-4a5b65e8d8b6']);
+    if (BLOCKED.has(mbid)) return;
+
     const result = await database.query('SELECT name FROM artists WHERE mbid = $1', [mbid]);
     if (!result.rows[0]) return;
-    const artistName = result.rows[0].name;
 
-    const fanartProvider = registry.getProvider('fanart');
-    if (fanartProvider) {
-      try {
-        const images = await fanartProvider.getArtistImages(mbid);
-        if (images.length > 0) {
-          await this._storeImageUrls('artist', mbid, images, 'fanart');
+    // Skip image types we already have cached or user-uploaded
+    const existing = await database.query(
+      `SELECT DISTINCT cover_type FROM images
+       WHERE entity_type = 'artist' AND entity_mbid = $1 AND (cached = true OR user_uploaded = true)`,
+      [mbid]
+    );
+    const existingTypes = new Set(existing.rows.map(r => r.cover_type));
+
+    const ARTIST_IMAGE_TYPES = ['Poster', 'Banner', 'Fanart', 'Logo'];
+    const missingTypes = ARTIST_IMAGE_TYPES.filter(t => !existingTypes.has(t));
+    if (missingTypes.length === 0) {
+      logger.info(`Image: All artist image types already cached for ${mbid}, skipping`);
+      return;
+    }
+
+    // Provider fallback order: Fanart > Deezer
+    // For each missing type, try providers in order, stop at first hit
+    const providers = [
+      registry.getProvider('fanart'),
+      registry.getProvider('deezer')
+    ].filter(Boolean);
+
+    // Cache each provider's API response to avoid repeat calls
+    const cache = new Map();
+    const getImages = async (provider) => {
+      if (!cache.has(provider.name)) {
+        try {
+          cache.set(provider.name, await provider.getArtistImages(mbid));
+        } catch (err) {
+          logger.warn(`Image: ${provider.name} artist images failed for ${mbid}: ${err.message}`);
+          cache.set(provider.name, []);
         }
-      } catch (err) {
-        logger.error(`Image: Fanart artist images failed for ${mbid}: ${err.message}`);
+      }
+      return cache.get(provider.name);
+    };
+
+    for (const type of missingTypes) {
+      for (const provider of providers) {
+        const images = await getImages(provider);
+        const match = images.find(img => img.CoverType === type);
+        if (match) {
+          await this._storeImageUrls('artist', mbid, [match], match.Provider || provider.name);
+          break;
+        }
       }
     }
   }
@@ -388,30 +471,53 @@ class BackgroundJobQueue {
        WHERE rg.mbid = $1 LIMIT 1`, [mbid]
     );
     if (!result.rows[0]) return;
-    const { title, artist_name } = result.rows[0];
 
-    const caaProvider = registry.getProvider('coverartarchive');
-    if (caaProvider) {
-      try {
-        const images = await caaProvider.getAlbumImages(mbid);
-        if (images.length > 0) {
-          await this._storeImageUrls('release_group', mbid, images, 'coverartarchive');
-          return;
-        }
-      } catch (err) {
-        logger.warn(`Image: CAA album images failed for ${mbid}: ${err.message}`);
-      }
+    // Skip image types we already have cached or user-uploaded
+    const existing = await database.query(
+      `SELECT DISTINCT cover_type FROM images
+       WHERE entity_type = 'release_group' AND entity_mbid = $1 AND (cached = true OR user_uploaded = true)`,
+      [mbid]
+    );
+    const existingTypes = new Set(existing.rows.map(r => r.cover_type));
+
+    const ALBUM_IMAGE_TYPES = ['Cover', 'Disc'];
+    const missingTypes = ALBUM_IMAGE_TYPES.filter(t => !existingTypes.has(t));
+    if (missingTypes.length === 0) {
+      logger.info(`Image: All album image types already cached for ${mbid}, skipping`);
+      return;
     }
 
-    const fanartProvider = registry.getProvider('fanart');
-    if (fanartProvider?.getAlbumImages) {
-      try {
-        const images = await fanartProvider.getAlbumImages(mbid);
-        if (images.length > 0) {
-          await this._storeImageUrls('release_group', mbid, images, 'fanart');
+    // Provider fallback order: Fanart > CAA > Deezer
+    // For each missing type, try providers in order, stop at first hit
+    const providers = [
+      registry.getProvider('fanart'),
+      registry.getProvider('coverartarchive'),
+      registry.getProvider('deezer')
+    ].filter(Boolean);
+
+    // Cache each provider's API response to avoid repeat calls
+    const cache = new Map();
+    const getImages = async (provider) => {
+      if (!cache.has(provider.name)) {
+        try {
+          const fn = provider.getAlbumImages?.bind(provider);
+          cache.set(provider.name, fn ? await fn(mbid) : []);
+        } catch (err) {
+          logger.warn(`Image: ${provider.name} album images failed for ${mbid}: ${err.message}`);
+          cache.set(provider.name, []);
         }
-      } catch (err) {
-        logger.error(`Image: Fanart album images failed for ${mbid}: ${err.message}`);
+      }
+      return cache.get(provider.name);
+    };
+
+    for (const type of missingTypes) {
+      for (const provider of providers) {
+        const images = await getImages(provider);
+        const match = images.find(img => img.CoverType === type);
+        if (match) {
+          await this._storeImageUrls('release_group', mbid, [match], match.Provider || provider.name);
+          break;
+        }
       }
     }
   }
@@ -460,6 +566,23 @@ class BackgroundJobQueue {
     `);
     if (result.rows.length > 0) {
       logger.info(`Reset ${result.rows.length} stuck jobs to pending`);
+    }
+
+    // Reset completed image jobs that have no cached images — allows re-fetch
+    // when new providers are added or previous attempts found nothing
+    const imageReset = await database.query(`
+      UPDATE metadata_jobs SET status = 'pending', attempts = 0, started_at = NULL
+      WHERE job_type IN ('fetch_artist_images', 'fetch_album_images')
+        AND status = 'completed'
+        AND NOT EXISTS (
+          SELECT 1 FROM images
+          WHERE images.entity_mbid = metadata_jobs.entity_mbid
+            AND images.cached = true
+        )
+      RETURNING id
+    `);
+    if (imageReset.rows.length > 0) {
+      logger.info(`Reset ${imageReset.rows.length} completed image jobs with no cached images to pending`);
     }
   }
 

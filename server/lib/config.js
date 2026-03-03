@@ -53,11 +53,14 @@ class Config {
           enabled: true  // No API key needed!
         },
         coverartarchive: {
-          enabled: false  // Album cover downloads - default OFF (Lidarr handles this)
+          enabled: true  // Album covers from MusicBrainz/Internet Archive
         },
         fanart: {
           enabled: !!process.env.FANART_API_KEY,  // Auto-enable if API key in environment
           apiKey: process.env.FANART_API_KEY || ''  // Get free key from https://fanart.tv/get-an-api-key/
+        },
+        deezer: {
+          enabled: true  // Free, no API key needed
         }
         // lastfm: {
         //   enabled: false,
@@ -72,15 +75,16 @@ class Config {
         compatibilityMode: 'plugin', // or 'legacy'
         metadataProfile: 'default'
       },
+      lidarrIntegration: {
+        enabled: !!(process.env.LIDARR_URL && process.env.LIDARR_API_KEY),
+        url: process.env.LIDARR_URL || '',
+        apiKey: process.env.LIDARR_API_KEY || ''
+      },
       metadata: {
         fetchTypes: {
           albumTypes: ['Studio', 'EP', 'Single'], // Which release types to fetch — mirrors Metadata Browser filter
           releaseStatuses: ['Official'] // Release status filter — empty = no status filter
         }
-      },
-      refresh: {
-        artistTTL: parseInt(process.env.ARTIST_TTL_DAYS) || 7, // Days before artist data expires
-        bulkRefreshInterval: parseInt(process.env.BULK_REFRESH_DAYS) || 180 // Days between bulk refreshes
       }
     };
 

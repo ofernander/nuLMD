@@ -4,6 +4,7 @@ const MusicBrainzProvider = require('../providers/musicbrainz');
 const WikipediaProvider = require('../providers/wikipedia');
 const CoverArtArchiveProvider = require('../providers/coverartarchive');
 const FanartTVProvider = require('../providers/fanart');
+const DeezerProvider = require('../providers/deezer');
 
 class ProviderRegistry {
   constructor() {
@@ -27,12 +28,21 @@ class ProviderRegistry {
       musicbrainz: MusicBrainzProvider,
       wikipedia: WikipediaProvider,
       coverartarchive: CoverArtArchiveProvider,
-      fanart: FanartTVProvider
+      fanart: FanartTVProvider,
+      deezer: DeezerProvider
     };
+
+    // Providers that are enabled by default (no API key needed)
+    const enabledByDefault = ['coverartarchive', 'deezer'];
 
     for (const [name, ProviderClass] of Object.entries(providerClasses)) {
       let providerConfig = providerConfigs[name] || {};
-      
+
+      // Enable by default if no config exists and provider doesn't need a key
+      if (!providerConfigs[name] && enabledByDefault.includes(name)) {
+        providerConfig = { enabled: true };
+      }
+
       // Special handling for Fanart: prioritize environment variable
       if (name === 'fanart' && process.env.FANART_API_KEY) {
         providerConfig = {

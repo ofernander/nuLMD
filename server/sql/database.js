@@ -265,7 +265,9 @@ class Database {
         a.last_accessed_at,
         COUNT(DISTINCT arg.release_group_mbid) as album_count,
         COUNT(DISTINCT r.mbid) as release_count,
-        COUNT(DISTINCT t.mbid) as track_count
+        COUNT(DISTINCT t.mbid) as track_count,
+        (SELECT COUNT(*) FROM images i WHERE i.entity_type = 'artist' AND i.entity_mbid = a.mbid AND i.cached = true) as artist_image_count,
+        (SELECT COUNT(*) FROM images i2 WHERE i2.entity_type = 'release_group' AND i2.entity_mbid IN (SELECT arg2.release_group_mbid FROM artist_release_groups arg2 WHERE arg2.artist_mbid = a.mbid) AND i2.cached = true) as album_image_count
       FROM artists a
       LEFT JOIN artist_release_groups arg ON arg.artist_mbid = a.mbid
       LEFT JOIN releases r ON r.release_group_mbid = arg.release_group_mbid
