@@ -12,9 +12,12 @@ Metadata manager & proxy server for Lidarr
 - Caches artist & album art, pulling from multiple sources
 - Serves metadata & images to Lidarr by emulating the old Lidarr Metadata Server API
 
-### Lidarr Disclaimer
+
+### Disclaimer
 
 nuLMD is not related to, supported, or endorsed by the official Lidarr dev team
+
+Vibe coded with love
 
 ## Requirements
 
@@ -237,7 +240,11 @@ if not found will attempt to download from the source
 
 ### CoverArtArchive.org
 
-Pulls album cover artwork from `https://coverartarchive.org/`
+Pulls album cover artwork from `https://coverartarchive.org`
+
+### Deezer.com
+
+Pulls artist and album cover art from `https://deezer.com`
 
 ### Fanart.tv
 
@@ -250,7 +257,7 @@ environment:
   - FANART_API_KEY=your_key_here
 ```
 
-Get a key: `https://fanart.tv/get-an-api-key/`
+Get a key: `https://fanart.tv/get-an-api-key`
 
 ## Custom MusicBrainz Server
 
