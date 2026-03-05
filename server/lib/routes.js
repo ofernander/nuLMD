@@ -826,6 +826,8 @@ router.get('/jobs/recent', async (req, res, next) => {
         FROM metadata_jobs j
         LEFT JOIN artists a ON a.mbid = j.entity_mbid
         LEFT JOIN release_groups rg ON rg.mbid = j.entity_mbid
+        WHERE j.status IN ('processing', 'pending')
+           OR (j.status IN ('completed', 'failed') AND j.completed_at > NOW() - INTERVAL '10 minutes')
 
         UNION ALL
 
@@ -921,8 +923,7 @@ router.get('/jobs/recent', async (req, res, next) => {
         CASE status
           WHEN 'processing' THEN 0
           WHEN 'pending'    THEN 1
-          WHEN 'failed'     THEN 2
-          WHEN 'completed'  THEN 3
+          ELSE 2
         END ASC,
         created_at DESC
       LIMIT 50
