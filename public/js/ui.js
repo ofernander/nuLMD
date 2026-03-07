@@ -878,16 +878,17 @@ const ui = {
             html += '<tbody>';
 
             for (const result of searchResults) {
-                const overview = result.Overview || '<em style="color: var(--text-secondary)">No overview available</em>';
-                const type = result.Type || '-';
-                const country = result.Country || '-';
+                const overview = result.overview || '';
+                const overviewDisplay = overview ? this.escapeHtml(overview.substring(0, 300) + (overview.length > 300 ? '...' : '')) : '<em style="color: var(--text-secondary)">No overview available</em>';
+                const type = result.type || '-';
+                const country = result.country || '-';
                 html += `
                     <tr>
-                        <td><strong>${this.escapeHtml(result.ArtistName)}</strong>${result.Disambiguation ? '<br><small style="color:var(--text-secondary)">' + this.escapeHtml(result.Disambiguation) + '</small>' : ''}</td>
+                        <td><strong>${this.escapeHtml(result.artistname)}</strong>${result.disambiguation ? '<br><small style="color:var(--text-secondary)">' + this.escapeHtml(result.disambiguation) + '</small>' : ''}</td>
                         <td>${this.escapeHtml(type)}</td>
                         <td>${this.escapeHtml(country)}</td>
-                        <td style="max-width: 400px; font-size: 0.85rem;">${this.escapeHtml(typeof overview === 'string' ? overview.substring(0, 300) + (overview.length > 300 ? '...' : '') : '')}</td>
-                        <td><button class="btn btn-primary" onclick="ui.fetchArtistFromSearch('${result.Id}', this)">Fetch</button></td>
+                        <td style="max-width: 400px; font-size: 0.85rem;">${overviewDisplay}</td>
+                        <td><button class="btn btn-primary" onclick="ui.fetchArtistFromSearch('${result.id}', this)">Fetch</button></td>
                     </tr>
                 `;
             }
