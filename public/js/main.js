@@ -65,7 +65,7 @@ const api = {
     },
 
     async searchArtist(query, limit = 10) {
-        const params = new URLSearchParams({ query, limit });
+        const params = new URLSearchParams({ query, limit, type: 'all' });
         const response = await fetch(`/search?${params}`);
         if (!response.ok) throw new Error('Search failed');
         const results = await response.json();

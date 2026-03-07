@@ -10,9 +10,9 @@ const database = require('./sql/database');
 const routes = require('./lib/routes');
 const lidarr = require('./lib/lidarr');
 const metaHandler = require('./lib/metaHandler');
-const search = require('./lib/search');
 const { registry } = require('./lib/providerRegistry');
 const { initializeProviders } = require('./lib/providerRegistry');
+const { lidarrSearch } = require('./lib/search');
 const backgroundJobQueue = require('./lib/backgroundJobQueue');
 const { processJob } = require('./lib/jobProcessor');
 const imageDownloadQueue = require('./lib/imageDownloadQueue');
@@ -110,63 +110,21 @@ app.get('/album/:mbid', async (req, res) => {
   }
 });
 
-// Lidarr search - lightweight, no storage
+// Lidarr search - delegates to search.js, replicates oldLMD /search behavior
 app.get('/search', async (req, res) => {
   try {
-    const { query, limit = 3 } = req.query;
-
+    const { query, type, limit = 10, artist, includeTracks } = req.query;
     if (!query) return res.json([]);
-
-    logger.info(`Lidarr search: ${query}`);
-
-    const [artistResults, albumResults] = await Promise.all([
-      search.searchArtists(query, limit),
-      search.searchAlbums(query, limit)
-    ]);
-
-    logger.info(`Found ${artistResults.length} artists and ${albumResults.length} albums for "${query}"`);
-
-    const artists = artistResults.map(result => ({
-      Id: result.id,
-      ArtistName: result.name,
-      SortName: result.sortName || result.name,
-      Disambiguation: result.disambiguation || '',
-      Status: 'active',
-      Type: result.type || null,
-      Country: result.country || '',
-      Gender: '',
-      Overview: result.overview || '',
-      Rating: { Count: 0, Value: null },
-      ArtistAliases: [],
-      Tags: [],
-      Genres: [],
-      Links: [],
-      Images: result.images || [],
-      Albums: [],
-      OldIds: []
-    }));
-
-    const albums = albumResults.map(result => {
-      const artistCredit = result.artistCredit || [];
-      const artistId = artistCredit.length > 0 ? artistCredit[0].artist.id : '';
-      return {
-        id: result.id,
-        title: result.title,
-        disambiguation: result.disambiguation || '',
-        overview: '',
-        releasedate: result.firstReleaseDate || null,
-        artistid: artistId,
-        artists: [], releases: [], aliases: [], oldids: [],
-        rating: { Count: 0, Value: null },
-        genres: [], links: [],
-        images: result.images || []
-      };
+    logger.info(`Lidarr search: ${query} (type=${type})`);
+    const results = await lidarrSearch(query, type, {
+      limit: parseInt(limit),
+      artist,
+      includeTracks: includeTracks === '1' || includeTracks === 'true'
     });
-
-    res.json([
-      ...artists.map(a => ({ album: null, artist: a, score: 100 })),
-      ...albums.map(a => ({ album: a, artist: null, score: 100 }))
-    ]);
+    if (results.error) {
+      return res.status(results.status).json({ error: results.error });
+    }
+    res.json(results);
   } catch (error) {
     logger.error(`Error in search endpoint:`, error);
     res.status(500).json({ error: error.message });
