@@ -1,6 +1,6 @@
 services:
   nulmd-server:
-    build: .
+    image: ghcr.io/ofernander/nulmd:latest
     container_name: nulmd-server
     hostname: nulmd-server
     ports:
