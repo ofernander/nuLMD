@@ -27,10 +27,10 @@ Vibe coded with love
 
 ### Option 1: Standalone (Existing Lidarr)
 
+Create a `docker-compose.yml` and run:
+
 ```bash
-git clone https://github.com/ofernander/nulmd.git
-cd nulmd
-docker compose up -d --build
+docker compose up -d
 ```
 
 Access web UI: `http://localhost:5001`
@@ -39,7 +39,7 @@ Access web UI: `http://localhost:5001`
 ```yaml
 services:
   nulmd-server:
-    build: .
+    image: ghcr.io/ofernander/nulmd:latest
     container_name: nulmd-server
     hostname: nulmd-server
     ports:
@@ -138,7 +138,7 @@ services:
       - nulmd_default
 
   nulmd-server:
-    build: .
+    image: ghcr.io/ofernander/nulmd:latest
     container_name: nulmd-server
     hostname: nulmd-server
     ports:
@@ -212,6 +212,14 @@ networks:
 ```
 
 
+
+### Option 3: Build from Source
+
+```bash
+git clone https://github.com/ofernander/nulmd.git
+cd nulmd
+docker compose up -d --build
+```
 
 ## Configuration
 
