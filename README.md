@@ -7,7 +7,7 @@ Metadata manager & server for Lidarr
 ## What it does
 
 - Replaces the official Lidarr metadata server
-- Fetches artist & album metadata directly from MusicBrainz with support for local MusicBrainz server
+- Fetches artist & album metadata directly from MusicBrainz
 - Caches metadata in PostgreSQL database locally to build metadata cache of only the metadata you need (creates smaller MusicBrainz database)
 - Caches artist & album art to serve to Lidarr locally
 
