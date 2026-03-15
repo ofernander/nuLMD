@@ -1,23 +1,22 @@
 # nuLMD
 
-Metadata manager & proxy server for Lidarr
+Metadata manager & server for Lidarr
 
 ![nuLMD](/public/assets/project_screen.png)
 
 ## What it does
 
-- Brings functionality back to Lidarr and removes the need for the official Lidarr metadata server/LMD
-- Fetches artist & album metadata directly from MusicBrainz
-- Caches metadata in PostgreSQL to build local metadata cache of only the metadata you need
-- Caches artist & album art, pulling from multiple sources
-- Serves metadata & images to Lidarr by emulating the old Lidarr Metadata Server API
+- Replaces the official Lidarr metadata server
+- Fetches artist & album metadata directly from MusicBrainz with support for local MusicBrainz server
+- Caches metadata in PostgreSQL database locally to build metadata cache of only the metadata you need (creates smaller MusicBrainz database)
+- Caches artist & album art to serve to Lidarr locally
 
 
 ### Disclaimer
 
-nuLMD is not related to, supported, or endorsed by the official Lidarr dev team
+LIDARR - nuLMD is not related to, supported, or endorsed by the official Lidarr dev team
 
-Vibe coded with love
+Ai - Vibe coded with intention, understanding, & oversight. 
 
 ## Requirements
 
