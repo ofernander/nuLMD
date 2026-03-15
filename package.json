@@ -1,7 +1,7 @@
 {
   "name": "nulmd",
-  "version": "0.2.7",
-  "description": "New Lidarr Metadata Server - A modern metadata aggregation layer for Lidarr",
+  "version": "0.3.0",
+  "description": "New Lidarr Metadata Server",
   "main": "server/index.js",
   "scripts": {
     "start": "node server/index.js",

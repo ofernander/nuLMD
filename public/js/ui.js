@@ -114,7 +114,12 @@ const ui = {
             document.getElementById('dashboardAlbumCount').textContent = stats.database.albums.toLocaleString();
             document.getElementById('dashboardReleaseCount').textContent = stats.database.releases.toLocaleString();
             document.getElementById('dashboardTrackCount').textContent = stats.database.tracks.toLocaleString();
-            document.getElementById('dashboardMemoryUsage').textContent = `${stats.memory.used_mb} MB`;
+            const imgMb = stats.database.images_mb;
+            const imgSize = imgMb >= 1024
+                ? `${(imgMb / 1024).toFixed(1)} GB`
+                : `${imgMb} MB`;
+            document.getElementById('dashboardImageCount').innerHTML =
+                `${stats.database.images.toLocaleString()} <span style="font-size: 0.9rem; font-weight: normal; color: var(--text-secondary);">(${imgSize})</span>`;
         } catch (error) {
             console.error('Failed to refresh dashboard stats:', error);
         }
@@ -194,33 +199,8 @@ const ui = {
                 html += '</div>';
             }
 
-            // Lidarr Integration card (separate from providers)
-            const lidarrInt = config.lidarrIntegration || {};
-            html += '<div class="card" style="margin-bottom: 15px;">';
-            html += '<h3>Lidarr Integration</h3>';
-            html += '<small class="form-text" style="display:block; margin-bottom: 1rem;">Connect to your Lidarr instance to trigger automatic metadata refreshes after nuLMD fetches new data.</small>';
-            html += '<div class="form-group">';
-            html += '<label for="lidarrIntegration.enabled">';
-            html += `<input type="checkbox" id="lidarrIntegration.enabled" ${lidarrInt.enabled ? 'checked' : ''}> Enabled`;
-            html += '</label>';
-            html += '</div>';
-            html += '<div class="form-group">';
-            html += '<label for="lidarrIntegration.url">Lidarr URL</label>';
-            html += `<input type="text" class="form-control" id="lidarrIntegration.url" value="${lidarrInt.url || ''}" placeholder="http://localhost:8686">`;
-            html += '</div>';
-            html += '<div class="form-group">';
-            html += '<label for="lidarrIntegration.apiKey">API Key</label>';
-            html += `<input type="text" class="form-control" id="lidarrIntegration.apiKey" value="${lidarrInt.apiKey || ''}" placeholder="Lidarr API key (Settings → General)">`;
-            html += '</div>';
-            html += '<div style="margin-top: 0.75rem;">';
-            html += '<button class="btn btn-secondary" onclick="ui.testLidarrConnection()">Test Connection</button>';
-            html += '<span id="lidarrTestResult" style="margin-left: 0.75rem; font-size: 0.85rem;"></span>';
-            html += '</div>';
-            html += '</div>';
-
             html += '<div style="display: flex; gap: 10px;">';
             html += '<button class="btn btn-primary" onclick="ui.saveMetadataSources()">Save Configuration</button>';
-            html += '<button class="btn btn-secondary" onclick="ui.restartServer()">Restart Server</button>';
             html += '</div>';
             
             container.innerHTML = html;
@@ -781,18 +761,6 @@ const ui = {
         try {
             const config = { providers: {} };
 
-            // Collect lidarrIntegration fields
-            const lidarrInt = {};
-            const lidarrEnabled = document.getElementById('lidarrIntegration.enabled');
-            const lidarrUrl = document.getElementById('lidarrIntegration.url');
-            const lidarrApiKey = document.getElementById('lidarrIntegration.apiKey');
-            if (lidarrEnabled) lidarrInt.enabled = lidarrEnabled.checked;
-            if (lidarrUrl) lidarrInt.url = lidarrUrl.value;
-            if (lidarrApiKey && lidarrApiKey.value && !lidarrApiKey.value.endsWith('***')) {
-                lidarrInt.apiKey = lidarrApiKey.value;
-            }
-            if (Object.keys(lidarrInt).length > 0) config.lidarrIntegration = lidarrInt;
-
             // Collect all provider form values
             document.querySelectorAll('#metadataSourcesForm input, #metadataSourcesForm select').forEach(input => {
                 const path = input.id.split('.');
@@ -916,6 +884,34 @@ const ui = {
         }
     },
 
+    // ─── Settings Tab ────────────────────────────────────────────────────────
+
+    async loadSettingsTab() {
+        try {
+            const config = await api.getConfig();
+            const li = config.lidarrIntegration || {};
+            document.getElementById('settings.lidarr.enabled').checked = !!li.enabled;
+            document.getElementById('settings.lidarr.url').value = li.url || '';
+            document.getElementById('settings.lidarr.apiKey').value = li.apiKey || '';
+        } catch (e) {
+            console.error('Failed to load settings:', e);
+        }
+    },
+
+    async saveSettings() {
+        try {
+            const url = document.getElementById('settings.lidarr.url').value;
+            const apiKey = document.getElementById('settings.lidarr.apiKey').value;
+            const enabled = document.getElementById('settings.lidarr.enabled').checked;
+            const config = { lidarrIntegration: { enabled, url } };
+            if (apiKey && !apiKey.endsWith('***')) config.lidarrIntegration.apiKey = apiKey;
+            await api.updateConfig(config);
+            this.showSuccess('Settings saved — restart server to apply');
+        } catch (e) {
+            this.showError('Failed to save settings');
+        }
+    },
+
     // ─── Lidarr Integration ─────────────────────────────────────────────────
 
     async testLidarrConnection() {
@@ -924,9 +920,9 @@ const ui = {
         resultEl.style.color = 'var(--text-secondary)';
 
         try {
-            const url = document.getElementById('lidarrIntegration.url')?.value || '';
-            const apiKey = document.getElementById('lidarrIntegration.apiKey')?.value || '';
-            const enabled = document.getElementById('lidarrIntegration.enabled')?.checked || false;
+            const url = document.getElementById('settings.lidarr.url')?.value || '';
+            const apiKey = document.getElementById('settings.lidarr.apiKey')?.value || '';
+            const enabled = document.getElementById('settings.lidarr.enabled')?.checked || false;
 
             if (!url || !apiKey) {
                 resultEl.textContent = '✘ URL and API key required';
@@ -1377,6 +1373,53 @@ const ui = {
         }
     },
 
+    async refreshConnectionsCard() {
+        try {
+            const response = await fetch('/api/requests/recent');
+            const entries = await response.json();
+            const container = document.getElementById('connectionsCard');
+            if (!container) return;
+
+            if (entries.length === 0) {
+                container.innerHTML = '<div class="conn-empty">No connections yet</div>';
+                return;
+            }
+
+            container.innerHTML = entries.map(e => {
+                const isInbound  = e.direction === 'inbound';
+                const time = new Date(e.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+                const statusClass = e.status === 'error'  ? 'conn-status-error'
+                                  : e.status === 'cached' ? 'conn-status-cached'
+                                  : 'conn-status-ok';
+                const arrow     = isInbound ? '&rarr;' : '&larr;';
+                const outboundClass = {
+                    'MusicBrainz':    'conn-mb',
+                    'Wikipedia':      'conn-wikipedia',
+                    'CoverArtArchive':'conn-caa',
+                    'Fanart':         'conn-fanart',
+                    'Deezer':         'conn-deezer'
+                }[e.label] || 'conn-mb';
+                const fromLabel = isInbound
+                    ? '<span class="conn-peer conn-lidarr">Lidarr</span>'
+                    : '<span class="conn-peer conn-nuLMD">nuLMD</span>';
+                const toLabel   = isInbound
+                    ? '<span class="conn-peer conn-nuLMD">nuLMD</span>'
+                    : `<span class="conn-peer ${outboundClass}">${this.escapeHtml(e.label)}</span>`;
+
+                return `
+                    <div class="conn-row ${isInbound ? 'conn-inbound' : 'conn-outbound'}">
+                        <span class="conn-time">${time}</span>
+                        <span class="conn-direction">${fromLabel} <span class="conn-arrow">${arrow}</span> ${toLabel}</span>
+                        <span class="conn-label">${this.escapeHtml(e.label)}</span>
+                        <span class="conn-detail">${this.escapeHtml(e.detail)}</span>
+                        <span class="conn-dot ${statusClass}"></span>
+                    </div>`;
+            }).join('');
+        } catch (error) {
+            console.error('Failed to refresh connections:', error);
+        }
+    },
+
     async clearJobQueue() {
         if (!confirm('Clear all pending jobs from the queue?')) return;
         try {
@@ -1459,6 +1502,15 @@ const ui = {
             this.jobsRefreshTimeout = setTimeout(pollJobs, interval);
         };
         pollJobs();
+
+        // Connections: poll at 2s when dashboard active
+        const pollConnections = async () => {
+            if (document.getElementById('dashboard-tab').classList.contains('active')) {
+                await this.refreshConnectionsCard();
+            }
+            this.connectionsRefreshTimeout = setTimeout(pollConnections, 2000);
+        };
+        pollConnections();
     },
 
     stopAutoRefresh() {
@@ -1469,6 +1521,10 @@ const ui = {
         if (this.jobsRefreshTimeout) {
             clearTimeout(this.jobsRefreshTimeout);
             this.jobsRefreshTimeout = null;
+        }
+        if (this.connectionsRefreshTimeout) {
+            clearTimeout(this.connectionsRefreshTimeout);
+            this.connectionsRefreshTimeout = null;
         }
     },
 

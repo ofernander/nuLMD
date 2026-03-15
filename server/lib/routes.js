@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const { getRequestLog } = require('./request');
 const { registry } = require('./providerRegistry');
 const config = require('./config');
 const cache = require('./cache');
@@ -19,6 +20,26 @@ const ARTIST_IMAGE_TYPES = ['Poster', 'Banner', 'Fanart', 'Logo', 'Clearart', 'T
 const ALBUM_IMAGE_TYPES  = ['Cover', 'Disc', 'Clearart'];
 const MIME_TO_EXT = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif' };
 const IMAGES_BASE = path.join(__dirname, '../../data/images');
+
+// Shell out to `du` for accurate directory size — same as `du -sb`
+// Result is cached for 30 seconds to avoid running on every stats poll
+const { execFile } = require('child_process');
+let _imageDirSizeCache = { bytes: 0, ts: 0 };
+const IMAGE_DIR_SIZE_TTL = 30000;
+
+async function getDirSizeBytes(dirPath) {
+  if (Date.now() - _imageDirSizeCache.ts < IMAGE_DIR_SIZE_TTL) {
+    return _imageDirSizeCache.bytes;
+  }
+  return new Promise(resolve => {
+    execFile('du', ['-sb', dirPath], (err, stdout) => {
+      if (err) { resolve(_imageDirSizeCache.bytes); return; }
+      const bytes = parseInt(stdout.split('\t')[0], 10) || 0;
+      _imageDirSizeCache = { bytes, ts: Date.now() };
+      resolve(bytes);
+    });
+  });
+}
 
 // MusicBrainz special entities — never fully fetch these
 const BLOCKED_ARTIST_MBIDS = new Set([
@@ -69,9 +90,10 @@ router.post('/jobs/kill-active', async (req, res, next) => {
 // System stats
 router.get('/stats', async (req, res, next) => {
   try {
-    const [dbStats, jobStats] = await Promise.all([
+    const [dbStats, jobStats, imageDirBytes] = await Promise.all([
       database.getStats(),
-      backgroundJobQueue.getStats()
+      backgroundJobQueue.getStats(),
+      getDirSizeBytes(IMAGES_BASE)
     ]);
     
     // Calculate uptime
@@ -92,6 +114,8 @@ router.get('/stats', async (req, res, next) => {
         albums: parseInt(dbStats.album_count),
         releases: parseInt(dbStats.release_count),
         tracks: parseInt(dbStats.track_count),
+        images: parseInt(dbStats.cached_images),
+        images_mb: Math.round(imageDirBytes / 1024 / 1024 * 10) / 10,
         size_mb: Math.round(parseInt(dbStats.db_size_bytes) / 1024 / 1024)
       },
       jobs: {
@@ -1031,6 +1055,12 @@ router.get('/logs/tail', (req, res) => {
   });
   
   res.json(filteredLogs);
+});
+
+// Recent requests feed
+router.get('/requests/recent', (req, res) => {
+    const last = getRequestLog().slice(-50).reverse();
+    res.json(last);
 });
 
 module.exports = router;

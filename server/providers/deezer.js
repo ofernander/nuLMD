@@ -1,6 +1,7 @@
 const axios = require('axios');
 const { logger } = require('../lib/logger');
 const database = require('../sql/database');
+const { logConnection } = require('../lib/request');
 
 /**
  * Deezer Provider — free, no API key required
@@ -48,6 +49,7 @@ class DeezerProvider {
     if (!artistName) return null;
 
     try {
+      logConnection({ direction: 'outbound', label: 'Deezer', detail: `${this.baseURL}/search/artist?q=${encodeURIComponent(artistName)}`, status: 'ok' });
       const response = await axios.get(`${this.baseURL}/search/artist`, {
         params: { q: artistName, limit: 5 },
         timeout: this.timeout
@@ -112,6 +114,7 @@ class DeezerProvider {
     }
 
     try {
+      logConnection({ direction: 'outbound', label: 'Deezer', detail: `${this.baseURL}/artist/${artist.id}/albums`, status: 'ok' });
       const response = await axios.get(`${this.baseURL}/artist/${artist.id}/albums`, {
         params: { limit: 100 },
         timeout: this.timeout
@@ -216,6 +219,7 @@ class DeezerProvider {
     if (!artist?.id) return null;
 
     try {
+      logConnection({ direction: 'outbound', label: 'Deezer', detail: `${this.baseURL}/artist/${artist.id}`, status: 'ok' });
       const response = await axios.get(`${this.baseURL}/artist/${artist.id}`, {
         timeout: this.timeout
       });

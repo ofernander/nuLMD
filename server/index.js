@@ -8,6 +8,7 @@ const { logger } = require('./lib/logger');
 const config = require('./lib/config');
 const database = require('./sql/database');
 const routes = require('./lib/routes');
+const { logConnection } = require('./lib/request');
 const lidarr = require('./lib/lidarr');
 const metaHandler = require('./lib/metaHandler');
 const { registry } = require('./lib/providerRegistry');
@@ -53,6 +54,12 @@ app.get('/artist/:mbid', async (req, res) => {
     const { mbid } = req.params;
     logger.info(`Lidarr artist request: ${mbid}`);
     const formatted = await metaHandler.ensureArtist(mbid);
+    logConnection({
+        direction: 'inbound',
+        label: 'Artist Lookup',
+        detail: formatted.artistname || mbid.substring(0, 8) + '...',
+        status: 'ok'
+    });
 
     const artistCheck = await database.getArtist(mbid);
     if (artistCheck && !artistCheck.overview) {
@@ -86,6 +93,12 @@ app.get('/album/:mbid', async (req, res) => {
     const { mbid } = req.params;
     logger.info(`Lidarr album request: ${mbid}`);
     const formatted = await metaHandler.ensureAlbum(mbid);
+    logConnection({
+        direction: 'inbound',
+        label: 'Album Lookup',
+        detail: formatted.title || mbid.substring(0, 8) + '...',
+        status: 'ok'
+    });
 
     const albumCheck = await database.getReleaseGroup(mbid);
     if (albumCheck && !albumCheck.overview) {
@@ -116,6 +129,12 @@ app.get('/search', async (req, res) => {
     const { query, type, limit = 10, artist, includeTracks } = req.query;
     if (!query) return res.json([]);
     logger.info(`Lidarr search: ${query} (type=${type})`);
+    logConnection({
+        direction: 'inbound',
+        label: 'Search',
+        detail: query.length > 30 ? query.substring(0, 30) + '…' : query,
+        status: 'ok'
+    });
     const results = await lidarrSearch(query, type, {
       limit: parseInt(limit),
       artist,
