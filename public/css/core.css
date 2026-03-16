@@ -654,6 +654,7 @@ footer a:hover {
     font-size: 0.8rem;
 }
 
+.job-time  { color: var(--text-secondary); font-size: 0.75rem; flex-shrink: 0; min-width: 5.5rem; }
 .job-label { color: var(--text); font-weight: 500; }
 .job-artist-name { color: var(--text-secondary); font-weight: normal; }
 .job-type-badge { font-size: 0.7rem; color: var(--text-secondary); margin-left: 0.4rem; font-weight: normal; }
