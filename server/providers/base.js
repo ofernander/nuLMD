@@ -1,6 +1,7 @@
 const axios = require('axios');
 const { logger } = require('../lib/logger');
 const cache = require('../lib/cache');
+const { logConnection } = require('../lib/request');
 
 class BaseProvider {
   constructor(name, config) {
@@ -32,6 +33,28 @@ class BaseProvider {
       response => response,
       error => this.handleError(error)
     );
+
+    // Log every real outbound HTTP request to the connections feed
+    const providerName = this.name;
+    this.client.interceptors.request.use(config => {
+      try {
+        const base = (config.baseURL || '').replace(/\/$/, '');
+        const path = (config.url || '');
+        const params = config.params
+          ? '?' + Object.entries(config.params)
+              .filter(([k]) => k !== 'fmt' && k !== 'inc')
+              .map(([k, v]) => `${k}=${encodeURIComponent(v)}`)
+              .join('&')
+          : '';
+        logConnection({
+          direction: 'outbound',
+          label: providerName,
+          detail: base + path + params,
+          status: 'ok'
+        });
+      } catch (_) {}
+      return config;
+    });
   }
 
   setupRateLimiter() {

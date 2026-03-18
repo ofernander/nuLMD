@@ -654,6 +654,7 @@ footer a:hover {
     font-size: 0.8rem;
 }
 
+.job-time  { color: var(--text-secondary); font-size: 0.75rem; flex-shrink: 0; min-width: 8.5rem; }
 .job-label { color: var(--text); font-weight: 500; }
 .job-artist-name { color: var(--text-secondary); font-weight: normal; }
 .job-type-badge { font-size: 0.7rem; color: var(--text-secondary); margin-left: 0.4rem; font-weight: normal; }
@@ -722,6 +723,56 @@ footer a:hover {
     color: var(--text-secondary);
     margin-top: 0.2rem;
 }
+
+/* ── Connections Card ────────────────────────────────────────────────────── */
+.conn-container {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    max-height: 400px;
+    overflow-y: auto;
+    font-size: 0.8rem;
+    font-family: 'Courier New', monospace;
+}
+
+.conn-empty {
+    color: var(--text-secondary);
+    font-size: 0.875rem;
+    font-style: italic;
+    padding: 0.5rem 0;
+}
+
+.conn-row {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.3rem 0.5rem;
+    border-radius: 0.25rem;
+    border-left: 3px solid transparent;
+}
+
+.conn-inbound  { border-left-color: #ba478f; background: rgba(186, 71, 143, 0.04); }
+.conn-outbound { border-left-color: var(--primary); background: rgba(0, 166, 91, 0.04); }
+
+.conn-time      { color: var(--text-secondary); min-width: 8.5rem; flex-shrink: 0; }
+.conn-direction { display: flex; align-items: center; gap: 0.3rem; flex-shrink: 0; }
+.conn-arrow     { color: var(--text-secondary); }
+.conn-label     { font-weight: 600; color: var(--text); flex-shrink: 0; }
+.conn-detail    { color: var(--text-secondary); flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.conn-peer       { font-size: 0.7rem; padding: 0.1rem 0.35rem; border-radius: 0.2rem; font-weight: 600; }
+.conn-lidarr     { background: rgba(0, 166, 91, 0.15);   color: var(--primary); }
+.conn-nuLMD      { background: rgba(186, 71, 143, 0.15); color: #ba478f; }
+.conn-mb         { background: rgba(255, 165, 0, 0.15);  color: #ffa500; }
+.conn-wikipedia  { background: rgba(51, 102, 204, 0.15); color: #3366cc; }
+.conn-caa        { background: rgba(232, 93, 38, 0.15);  color: #e85d26; }
+.conn-fanart     { background: rgba(0, 188, 212, 0.15);  color: #00bcd4; }
+.conn-deezer     { background: rgba(161, 24, 229, 0.15); color: #a118e5; }
+
+.conn-dot           { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.conn-status-ok     { background: var(--primary); }
+.conn-status-cached { background: #ffa500; }
+.conn-status-error  { background: var(--danger); }
 
 @media (max-width: 768px) {
     .container {

@@ -1,5 +1,6 @@
 const axios = require('axios');
 const { logger } = require('../lib/logger');
+const { logConnection } = require('../lib/request');
 
 class FanartProvider {
   static capabilities = { artistImages: true, albumImages: false };
@@ -29,6 +30,7 @@ class FanartProvider {
     }
 
     try {
+      logConnection({ direction: 'outbound', label: 'Fanart', detail: `${this.baseURL}/music/${mbid}`, status: 'ok' });
       const response = await axios.get(`${this.baseURL}/music/${mbid}`, {
         params: {
           api_key: this.apiKey
@@ -113,6 +115,7 @@ class FanartProvider {
     }
 
     try {
+      logConnection({ direction: 'outbound', label: 'Fanart', detail: `${this.baseURL}/music/albums/${mbid}`, status: 'ok' });
       const response = await axios.get(`${this.baseURL}/music/albums/${mbid}`, {
         params: {
           api_key: this.apiKey

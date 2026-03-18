@@ -271,6 +271,17 @@ CREATE INDEX IF NOT EXISTS idx_metadata_jobs_status ON metadata_jobs(status, pri
 CREATE INDEX IF NOT EXISTS idx_metadata_jobs_entity ON metadata_jobs(entity_type, entity_mbid);
 CREATE INDEX IF NOT EXISTS idx_metadata_jobs_pending ON metadata_jobs(status) WHERE status = 'pending';
 
+-- Request log table (persists Lidarr/provider request feed across restarts)
+CREATE TABLE IF NOT EXISTS request_log (
+    id BIGSERIAL PRIMARY KEY,
+    timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    direction VARCHAR(10) NOT NULL,
+    label TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    status VARCHAR(10) NOT NULL DEFAULT 'ok'
+);
+CREATE INDEX IF NOT EXISTS idx_request_log_timestamp ON request_log(timestamp DESC);
+
 
 -- ============================================================================
 -- INDEXES

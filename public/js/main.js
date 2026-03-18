@@ -127,6 +127,8 @@ document.addEventListener('DOMContentLoaded', async () => {
                 ui.loadLogsTab();
             } else if (tabName === 'images') {
                 ui.loadImagesTab();
+            } else if (tabName === 'settings') {
+                ui.loadSettingsTab();
             }
         });
     });

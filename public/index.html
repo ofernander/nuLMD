@@ -29,6 +29,7 @@
             <button class="tab" data-tab="images">Image Browser</button>
             <button class="tab" data-tab="sources">Metadata Sources</button>
             <button class="tab" data-tab="logs">Logs</button>
+            <button class="tab" data-tab="settings">Settings</button>
         </nav>
 
         <main>
@@ -76,14 +77,21 @@
                             <div class="stat-value" id="dashboardTrackCount">-</div>
                         </div>
                         <div class="stat">
-                            <div class="stat-label">Memory Usage</div>
-                            <div class="stat-value" id="dashboardMemoryUsage">-</div>
+                            <div class="stat-label">Images Cached</div>
+                            <div class="stat-value" id="dashboardImageCount">-</div>
                         </div>
                     </div>
                 </div>
 
                 <div class="card">
-                    <h2>Active Jobs</h2>
+                    <h2>Requests</h2>
+                    <div id="connectionsCard" class="conn-container">
+                        <div class="conn-empty">No connections yet</div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <h2>Database Jobs</h2>
                     <div id="jobQueueCard" class="job-queue-container">
                         <div class="job-queue-empty">No jobs yet</div>
                     </div>
@@ -157,17 +165,10 @@
             <!-- Logs Tab -->
             <section id="logs-tab" class="tab-content">
                 <div style="display: grid; grid-template-columns: 260px 1fr; gap: 1.5rem; align-items: start;">
-                    <div style="position: sticky; top: 1rem; display: flex; flex-direction: column; gap: 1rem;">
+                    <div style="position: sticky; top: 1rem;">
                         <div class="card">
                             <h2>Log Files</h2>
                             <div id="logFileList"><p style="color: var(--text-secondary); font-size: 0.875rem;">Loading...</p></div>
-                        </div>
-                        <div class="card">
-                            <h2>Queue</h2>
-                            <div style="display: flex; flex-direction: column; gap: 0.5rem;">
-                                <button class="btn btn-secondary" style="width:100%;" onclick="ui.clearJobQueue()">Clear Pending Jobs</button>
-                                <button class="btn btn-danger" style="width:100%;" onclick="ui.killActiveJobs()">Kill Active Jobs</button>
-                            </div>
                         </div>
                     </div>
 
@@ -178,6 +179,40 @@
                         </div>
                     </div>
                 </div>
+            </section>
+            <!-- Settings Tab -->
+            <section id="settings-tab" class="tab-content">
+                <div class="card">
+                    <h2>Controls</h2>
+                    <div style="display: flex; gap: 1rem; flex-wrap: wrap; align-items: center;">
+                        <button class="btn btn-secondary" onclick="ui.clearJobQueue()">Clear Pending Jobs</button>
+                        <button class="btn btn-danger" onclick="ui.killActiveJobs()">Kill Active Jobs</button>
+                        <button class="btn btn-secondary" onclick="ui.restartServer()">Restart Server</button>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <h2>Lidarr Integration</h2>
+                    <small class="form-text" style="display:block; margin-bottom: 1rem;">Connect to your Lidarr instance to trigger automatic metadata refreshes after nuLMD fetches new data.</small>
+                    <div class="form-group">
+                        <label for="settings.lidarr.enabled"><input type="checkbox" id="settings.lidarr.enabled"> Enabled</label>
+                    </div>
+                    <div class="form-group">
+                        <label for="settings.lidarr.url">Lidarr URL</label>
+                        <input type="text" class="form-control" id="settings.lidarr.url" placeholder="http://localhost:8686">
+                    </div>
+                    <div class="form-group">
+                        <label for="settings.lidarr.apiKey">API Key</label>
+                        <input type="text" class="form-control" id="settings.lidarr.apiKey" placeholder="Lidarr API key (Settings → General)">
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 0.75rem; margin-top: 0.75rem;">
+                        <button class="btn btn-primary" onclick="ui.saveSettings()">Save</button>
+                        <button class="btn btn-secondary" onclick="ui.testLidarrConnection()">Test Connection</button>
+                        <span id="lidarrTestResult" style="font-size: 0.85rem;"></span>
+                    </div>
+                </div>
+
+
             </section>
         </main>
 
