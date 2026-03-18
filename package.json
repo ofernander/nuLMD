@@ -1,6 +1,6 @@
 {
   "name": "nulmd",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "New Lidarr Metadata Server",
   "main": "server/index.js",
   "scripts": {

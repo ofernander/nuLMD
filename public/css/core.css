@@ -654,7 +654,7 @@ footer a:hover {
     font-size: 0.8rem;
 }
 
-.job-time  { color: var(--text-secondary); font-size: 0.75rem; flex-shrink: 0; min-width: 5.5rem; }
+.job-time  { color: var(--text-secondary); font-size: 0.75rem; flex-shrink: 0; min-width: 8.5rem; }
 .job-label { color: var(--text); font-weight: 500; }
 .job-artist-name { color: var(--text-secondary); font-weight: normal; }
 .job-type-badge { font-size: 0.7rem; color: var(--text-secondary); margin-left: 0.4rem; font-weight: normal; }
@@ -754,7 +754,7 @@ footer a:hover {
 .conn-inbound  { border-left-color: #ba478f; background: rgba(186, 71, 143, 0.04); }
 .conn-outbound { border-left-color: var(--primary); background: rgba(0, 166, 91, 0.04); }
 
-.conn-time      { color: var(--text-secondary); min-width: 5.5rem; flex-shrink: 0; }
+.conn-time      { color: var(--text-secondary); min-width: 8.5rem; flex-shrink: 0; }
 .conn-direction { display: flex; align-items: center; gap: 0.3rem; flex-shrink: 0; }
 .conn-arrow     { color: var(--text-secondary); }
 .conn-label     { font-weight: 600; color: var(--text); flex-shrink: 0; }

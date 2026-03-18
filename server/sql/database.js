@@ -71,6 +71,21 @@ class Database {
       ADD COLUMN IF NOT EXISTS user_uploaded BOOLEAN DEFAULT FALSE,
       ADD COLUMN IF NOT EXISTS uploaded_at TIMESTAMP WITH TIME ZONE;
     `);
+
+    await this.query(`
+      CREATE TABLE IF NOT EXISTS request_log (
+        id BIGSERIAL PRIMARY KEY,
+        timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        direction VARCHAR(10) NOT NULL,
+        label TEXT NOT NULL,
+        detail TEXT NOT NULL,
+        status VARCHAR(10) NOT NULL DEFAULT 'ok'
+      )
+    `);
+
+    await this.query(`
+      CREATE INDEX IF NOT EXISTS idx_request_log_timestamp ON request_log(timestamp DESC)
+    `);
     
     logger.info('Column migrations complete');
   }
@@ -88,6 +103,9 @@ class Database {
       logger.error('Failed to create schema:', error);
       throw error;
     }
+
+    // Run column migrations on fresh installs too
+    await this.runColumnMigrations();
   }
 
   async query(text, params) {

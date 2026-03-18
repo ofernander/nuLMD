@@ -8,7 +8,7 @@ const { logger } = require('./lib/logger');
 const config = require('./lib/config');
 const database = require('./sql/database');
 const routes = require('./lib/routes');
-const { logConnection } = require('./lib/request');
+const { logConnection, init: initRequestLog } = require('./lib/request');
 const lidarr = require('./lib/lidarr');
 const metaHandler = require('./lib/metaHandler');
 const { registry } = require('./lib/providerRegistry');
@@ -185,6 +185,10 @@ async function start() {
     // Initialize database
     await database.initialize();
     logger.info('Database initialized');
+
+    // Load persisted request log from DB
+    await initRequestLog(database);
+    logger.info('Request log initialized');
 
     // Initialize metadata providers
     await initializeProviders();

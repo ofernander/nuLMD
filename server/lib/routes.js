@@ -850,8 +850,7 @@ router.get('/jobs/recent', async (req, res, next) => {
         FROM metadata_jobs j
         LEFT JOIN artists a ON a.mbid = j.entity_mbid
         LEFT JOIN release_groups rg ON rg.mbid = j.entity_mbid
-        WHERE j.status IN ('processing', 'pending')
-           OR (j.status IN ('completed', 'failed') AND j.completed_at > NOW() - INTERVAL '10 minutes')
+        WHERE j.status IN ('processing', 'pending', 'completed', 'failed')
 
         UNION ALL
 
@@ -911,7 +910,7 @@ router.get('/jobs/recent', async (req, res, next) => {
         FROM images i
         LEFT JOIN artists a3 ON a3.mbid = i.entity_mbid
         LEFT JOIN release_groups rg3 ON rg3.mbid = i.entity_mbid
-        WHERE i.cached = true AND i.cached_at > NOW() - INTERVAL '5 minutes'
+        WHERE i.cached = true
 
         UNION ALL
 
@@ -941,7 +940,7 @@ router.get('/jobs/recent', async (req, res, next) => {
         FROM images i
         LEFT JOIN artists a4 ON a4.mbid = i.entity_mbid
         LEFT JOIN release_groups rg4 ON rg4.mbid = i.entity_mbid
-        WHERE i.cache_failed = true AND i.last_verified_at > NOW() - INTERVAL '5 minutes'
+        WHERE i.cache_failed = true
       ) combined
       ORDER BY
         CASE status
@@ -950,7 +949,7 @@ router.get('/jobs/recent', async (req, res, next) => {
           ELSE 2
         END ASC,
         created_at DESC
-      LIMIT 50
+      LIMIT 100
     `);
     res.json(result.rows);
   } catch (error) {

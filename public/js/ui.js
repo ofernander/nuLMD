@@ -1309,18 +1309,15 @@ const ui = {
             const container = document.getElementById('jobQueueCard');
             if (!container) return;
 
-            if (jobs.length > 0) {
-                this.jobsCache = jobs;
-            }
-            const displayJobs = this.jobsCache || [];
-            this.jobsHasActive = displayJobs.some(j => j.status === 'processing' || j.status === 'pending');
-
-            if (!displayJobs.length) {
+            if (jobs.length === 0) {
+                this.jobsHasActive = false;
                 container.innerHTML = '<div class="job-queue-empty">No jobs yet</div>';
                 return;
             }
 
-            container.innerHTML = displayJobs.map(job => {
+            this.jobsHasActive = jobs.some(j => j.status === 'processing' || j.status === 'pending');
+
+            container.innerHTML = jobs.map(job => {
                 const label = JOB_LABELS[job.job_type] || job.job_type;
                 const mbidShort = job.entity_mbid.substring(0, 8);
                 const displayName = job.entity_name || (mbidShort + '...');
@@ -1362,7 +1359,7 @@ const ui = {
                 return `
                     <div class="job-row">
                         <div class="job-row-header">
-                            <span class="job-time">${new Date(job.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
+                            <span class="job-time">${new Date(job.created_at).toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + new Date(job.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
                             <span class="job-label">${artistPrefix}${this.escapeHtml(displayName)} <span class="job-type-badge">${label}</span></span>
                             <span class="job-status job-status-${job.status}">${job.status}</span>
                         </div>
@@ -1391,7 +1388,7 @@ const ui = {
 
             container.innerHTML = entries.map(e => {
                 const isInbound  = e.direction === 'inbound';
-                const time = new Date(e.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+                const time = new Date(e.timestamp).toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + new Date(e.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
                 const statusClass = e.status === 'error'  ? 'conn-status-error'
                                   : e.status === 'cached' ? 'conn-status-cached'
                                   : 'conn-status-ok';
