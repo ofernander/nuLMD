@@ -670,7 +670,7 @@ class ArtistService {
    * Ensures release group + Official releases are in DB.
    * Called by both Lidarr endpoint and UI fetch button.
    */
-  async ensureAlbum(mbid) {
+  async ensureAlbum(mbid, { background = false } = {}) {
     const mbProvider = registry.getProvider('musicbrainz');
     if (!mbProvider) throw new Error('MusicBrainz provider not available');
 

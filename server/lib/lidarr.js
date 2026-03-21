@@ -290,6 +290,21 @@ class LidarrFormatter {
   }
 
   async getAlbumsForArtist(artistMbid) {
+    // Only return albums after fetch_artist_albums job has completed.
+    // Until then return empty list — Lidarr adds artist with zero albums.
+    // fetchArtistAlbums runs ensureAlbum for every release group, gets correct
+    // artist_credit from MB, then triggers a Lidarr refresh. Ghost albums
+    // never reach Lidarr because their artistid points to a different artist.
+    const jobDone = await database.query(
+      `SELECT 1 FROM metadata_jobs
+       WHERE job_type = 'fetch_artist_albums'
+       AND entity_mbid = $1
+       AND status = 'completed'
+       LIMIT 1`,
+      [artistMbid]
+    );
+    if (jobDone.rows.length === 0) return [];
+
     const result = await database.query(`
       SELECT
         rg.mbid,

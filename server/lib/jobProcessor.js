@@ -298,26 +298,12 @@ async function fetchArtistAlbums(artistMbid) {
   const failedAlbums = [];
 
   for (const rgMbid of releaseGroups) {
-    // Skip if already has releases
-    const existing = await database.query(
-      'SELECT mbid FROM releases WHERE release_group_mbid = $1 LIMIT 1',
-      [rgMbid]
-    );
-    if (existing.rows.length > 0) continue;
-
     try {
-      const releases = await mbProvider.getReleasesByReleaseGroup(rgMbid);
-      const officialReleases = releases.filter(r => r.status === 'Official');
-      const toFetch = officialReleases.length > 0 ? officialReleases : releases;
-
-      for (const release of toFetch) {
-        const fullRelease = await mbProvider.getRelease(release.id);
-        await metaHandler.storeRelease(release.id, fullRelease);
-      }
+      await metaHandler.ensureAlbum(rgMbid, { background: true });
       fetched++;
-      logger.info(`Background: stored ${toFetch.length} releases for album ${rgMbid} (${fetched} albums processed)`);
+      logger.info(`Background: ensureAlbum complete for ${rgMbid} (${fetched} albums processed)`);
     } catch (error) {
-      logger.warn(`Background: failed to fetch releases for album ${rgMbid}: ${error.message}`);
+      logger.warn(`Background: failed to ensure album ${rgMbid}: ${error.message}`);
       failedAlbums.push(rgMbid);
     }
   }
@@ -325,13 +311,7 @@ async function fetchArtistAlbums(artistMbid) {
   // Retry failures
   if (failedAlbums.length > 0) {
     await retryFailed(failedAlbums, async (rgMbid) => {
-      const releases = await mbProvider.getReleasesByReleaseGroup(rgMbid);
-      const officialReleases = releases.filter(r => r.status === 'Official');
-      const toFetch = officialReleases.length > 0 ? officialReleases : releases;
-      for (const release of toFetch) {
-        const fullRelease = await mbProvider.getRelease(release.id);
-        await metaHandler.storeRelease(release.id, fullRelease);
-      }
+      await metaHandler.ensureAlbum(rgMbid, { background: true });
     }, 'album-releases');
   }
 
