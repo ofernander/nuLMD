@@ -280,7 +280,6 @@ async function fetchArtistAlbums(artistMbid) {
     return;
   }
 
-  const mbProvider = registry.getProvider('musicbrainz');
   const database = require('../sql/database');
 
   // Get all release groups already stored for this artist
@@ -299,7 +298,7 @@ async function fetchArtistAlbums(artistMbid) {
 
   for (const rgMbid of releaseGroups) {
     try {
-      await metaHandler.ensureAlbum(rgMbid, { background: true });
+      await metaHandler.ensureAlbum(rgMbid);
       fetched++;
       logger.info(`Background: ensureAlbum complete for ${rgMbid} (${fetched} albums processed)`);
     } catch (error) {
@@ -311,7 +310,7 @@ async function fetchArtistAlbums(artistMbid) {
   // Retry failures
   if (failedAlbums.length > 0) {
     await retryFailed(failedAlbums, async (rgMbid) => {
-      await metaHandler.ensureAlbum(rgMbid, { background: true });
+      await metaHandler.ensureAlbum(rgMbid);
     }, 'album-releases');
   }
 
