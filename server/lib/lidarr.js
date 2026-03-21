@@ -189,7 +189,7 @@ class LidarrFormatter {
       id: releaseGroup.mbid,
 
       // Present in oldLMD responses
-      type: releaseGroup.primary_type || 'Album',
+      type: releaseGroup.primary_type || ((secondaryTypes && secondaryTypes.length > 0) ? [] : 'Other'),
       secondarytypes: secondaryTypes || [],
 
       title: releaseGroup.title,
@@ -315,10 +315,9 @@ class LidarrFormatter {
         rg.artist_credit,
         COALESCE(
           (
-            SELECT json_agg(DISTINCT r.status)
+            SELECT json_agg(DISTINCT COALESCE(r.status, 'Pseudo-Release'))
             FROM releases r
             WHERE r.release_group_mbid = rg.mbid
-            AND r.status IS NOT NULL
           ),
           '[]'::json
         ) as release_statuses
@@ -342,7 +341,7 @@ class LidarrFormatter {
         ReleaseStatuses: releaseStatuses || [],
         SecondaryTypes: secondaryTypes || [],
         Title: album.title,
-        Type: album.primary_type || 'Album'
+        Type: album.primary_type || ((secondaryTypes && secondaryTypes.length > 0) ? [] : 'Other')
       };
     });
   }
@@ -383,7 +382,7 @@ class LidarrFormatter {
         id: release.mbid,
         title: release.title,
         disambiguation: release.disambiguation || '',
-        status: release.status || 'Official',
+        status: release.status || 'Pseudo-Release',
         releasedate: release.release_date
           ? (release.release_date instanceof Date
               ? release.release_date.toISOString().split('T')[0]

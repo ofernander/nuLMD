@@ -192,7 +192,7 @@ async function fetchArtistReleases(artistMbid, metadata) {
             // Store basic release-group info (we'll fetch full details later if needed)
             await metaHandler.storeReleaseGroup(releaseGroup.id, {
               title: releaseGroup.title || release.title,
-              primaryType: releaseGroup['primary-type'] || 'Album',
+              primaryType: releaseGroup['primary-type'] || null,
               secondaryTypes: releaseGroup['secondary-types'] || [],
               firstReleaseDate: releaseDate,
               disambiguation: releaseGroup.disambiguation || '',

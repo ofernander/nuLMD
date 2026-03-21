@@ -296,10 +296,16 @@ class ArtistService {
             [artistMbid, mbid]
           );
           if (link.rows.length === 0) {
-            await database.query(
-              'INSERT INTO artist_release_groups (artist_mbid, release_group_mbid, position) VALUES ($1, $2, 0) ON CONFLICT DO NOTHING',
-              [artistMbid, mbid]
+            const artistExists = await database.query(
+              'SELECT 1 FROM artists WHERE mbid = $1 LIMIT 1',
+              [artistMbid]
             );
+            if (artistExists.rows.length > 0) {
+              await database.query(
+                'INSERT INTO artist_release_groups (artist_mbid, release_group_mbid, position) VALUES ($1, $2, 0) ON CONFLICT DO NOTHING',
+                [artistMbid, mbid]
+              );
+            }
           }
         }
         return;
@@ -350,6 +356,14 @@ class ArtistService {
 
     // Link artist to release group if not already linked
     if (artistMbid) {
+      const artistExists = await database.query(
+        'SELECT 1 FROM artists WHERE mbid = $1 LIMIT 1',
+        [artistMbid]
+      );
+      if (artistExists.rows.length === 0) {
+        logger.info(`storeReleaseGroup: skipping artist link — artist ${artistMbid} not in DB`);
+        return;
+      }
       const link = await database.query(
         'SELECT * FROM artist_release_groups WHERE artist_mbid = $1 AND release_group_mbid = $2',
         [artistMbid, mbid]
@@ -761,7 +775,7 @@ class ArtistService {
     const config = require('./config');
     const statusFilter = config.get('metadata.fetchTypes.releaseStatuses', ['Official']);
     if (statusFilter.length === 0) return true;
-    const status = release.status || 'Official';
+    const status = release.status || 'Pseudo-Release';
     return statusFilter.includes(status);
   }
 
