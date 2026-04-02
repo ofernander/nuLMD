@@ -263,13 +263,29 @@ CREATE TABLE IF NOT EXISTS metadata_jobs (
     started_at TIMESTAMP WITH TIME ZONE,
     completed_at TIMESTAMP WITH TIME ZONE,
     metadata JSONB, -- arbitrary job-specific data
-    CONSTRAINT unique_job UNIQUE(job_type, entity_mbid),
+    -- Tree tracking: parent_job_id links to immediate parent, root_artist_mbid denormalises
+    -- the root of the tree for efficient completion checks without recursive walks.
+    -- NULL root_artist_mbid = standalone job (UI button, direct album lookup etc).
+    parent_job_id BIGINT REFERENCES metadata_jobs(id) ON DELETE SET NULL,
+    root_artist_mbid UUID,
     CHECK (status IN ('pending', 'processing', 'completed', 'failed'))
 );
+
+-- Standalone jobs: unique by job_type + entity_mbid when not part of a tree
+CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_standalone
+    ON metadata_jobs(job_type, entity_mbid)
+    WHERE root_artist_mbid IS NULL;
+
+-- Tree jobs: unique by job_type + entity_mbid + root artist
+CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_tree
+    ON metadata_jobs(job_type, entity_mbid, root_artist_mbid)
+    WHERE root_artist_mbid IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_metadata_jobs_status ON metadata_jobs(status, priority DESC, created_at);
 CREATE INDEX IF NOT EXISTS idx_metadata_jobs_entity ON metadata_jobs(entity_type, entity_mbid);
 CREATE INDEX IF NOT EXISTS idx_metadata_jobs_pending ON metadata_jobs(status) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_metadata_jobs_parent ON metadata_jobs(parent_job_id);
+CREATE INDEX IF NOT EXISTS idx_metadata_jobs_root_artist ON metadata_jobs(root_artist_mbid) WHERE root_artist_mbid IS NOT NULL;
 
 -- Request log table (persists Lidarr/provider request feed across restarts)
 CREATE TABLE IF NOT EXISTS request_log (

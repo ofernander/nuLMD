@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>nuLMD</title>
-    <link rel="stylesheet" href="/css/core.css?v=32">
+    <link rel="stylesheet" href="/css/core.css?v=39">
 </head>
 <body>
     <div class="container">
@@ -58,8 +58,6 @@
                             <div class="stat-label">Active Jobs</div>
                             <div class="stat-value" id="dashboardActiveJobs">-</div>
                         </div>
-                    </div>
-                    <div class="stats-grid" style="margin-top: 10px;">
                         <div class="stat">
                             <div class="stat-label">Artists Cached</div>
                             <div class="stat-value" id="dashboardArtistCount">-</div>
@@ -79,6 +77,7 @@
                         <div class="stat">
                             <div class="stat-label">Images Cached</div>
                             <div class="stat-value" id="dashboardImageCount">-</div>
+                            <div class="stat-sub" id="dashboardImageSize"></div>
                         </div>
                     </div>
                 </div>
@@ -94,6 +93,13 @@
                     <h2>Database Jobs</h2>
                     <div id="jobQueueCard" class="job-queue-container">
                         <div class="job-queue-empty">No jobs yet</div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <h2>Download Jobs</h2>
+                    <div id="downloadJobsCard" class="job-queue-container">
+                        <div class="job-queue-empty">No downloads yet</div>
                     </div>
                 </div>
             </section>
@@ -187,6 +193,7 @@
                     <div style="display: flex; gap: 1rem; flex-wrap: wrap; align-items: center;">
                         <button class="btn btn-secondary" onclick="ui.clearJobQueue()">Clear Pending Jobs</button>
                         <button class="btn btn-danger" onclick="ui.killActiveJobs()">Kill Active Jobs</button>
+                        <button class="btn btn-secondary" onclick="ui.clearDownloadQueue()">Clear Pending Downloads</button>
                         <button class="btn btn-secondary" onclick="ui.restartServer()">Restart Server</button>
                     </div>
                 </div>
@@ -221,7 +228,7 @@
         </footer>
     </div>
 
-    <script src="/js/main.js?v=32"></script>
-    <script src="/js/ui.js?v=32"></script>
+    <script src="/js/main.js?v=39"></script>
+    <script src="/js/ui.js?v=39"></script>
 </body>
 </html>

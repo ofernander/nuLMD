@@ -181,34 +181,61 @@ class LidarrFormatter {
       }
     }
 
+    // Always ensure the primary album artist is in the map.
+    // Some albums (compilations, remix albums) have track-level credits
+    // that don't include the primary artist — Tubifarry builds a dictionary
+    // keyed by artist ID and throws KeyNotFoundException if the primary artist
+    // is missing from the artists array.
+    if (artistId && !artistMap.has(artistId)) {
+      const primaryArtist = await database.getArtist(artistId);
+      if (primaryArtist) {
+        const primaryLinks = await this.getLinksForEntity('artist', artistId);
+        const primaryImages = await this.getImagesForEntity('artist', artistId);
+        artistMap.set(artistId, {
+          artistaliases: this.parseJson(primaryArtist.aliases) || [],
+          artistname: primaryArtist.name,
+          disambiguation: primaryArtist.disambiguation || '',
+          genres: (this.parseJson(primaryArtist.genres) || []).map(g => this.toTitleCase(g)),
+          id: primaryArtist.mbid,
+          images: primaryImages || [],
+          links: primaryLinks || [],
+          oldids: [],
+          overview: primaryArtist.overview || '',
+          rating: primaryArtist.rating ? { Count: 0, Value: parseFloat(primaryArtist.rating) } : { Count: 0, Value: null },
+          sortname: primaryArtist.sort_name,
+          status: primaryArtist.ended ? 'ended' : 'active',
+          type: primaryArtist.type || null
+        });
+      }
+    }
+
     // Return all artists — album-level credits + track-level credits
     const artists = [...artistMap.values()];
 
-    // Return with lowercase fields (old LMD format)
+    // Return with lowercase fields — alphabetical order matching oldLMD exactly
+    const releasedate = releaseGroup.first_release_date
+      ? (releaseGroup.first_release_date instanceof Date
+          ? releaseGroup.first_release_date.toISOString().split('T')[0]
+          : String(releaseGroup.first_release_date).split('T')[0])
+      : '';
+
     return {
-      id: releaseGroup.mbid,
-
-      // Present in oldLMD responses
-      type: releaseGroup.primary_type || 'Album',
-      secondarytypes: secondaryTypes || [],
-
-      title: releaseGroup.title,
-      disambiguation: releaseGroup.disambiguation || '',
-      overview: releaseGroup.overview || '',
-      releasedate: releaseGroup.first_release_date
-        ? (releaseGroup.first_release_date instanceof Date
-            ? releaseGroup.first_release_date.toISOString().split('T')[0]
-            : String(releaseGroup.first_release_date).split('T')[0])
-        : '',
+      aliases: [],
       artistid: artistId,
       artists: artists || [],
-      releases: releases || [],
-      aliases: [],
-      oldids: [],
-      rating: releaseGroup.rating ? { Count: 0, Value: parseFloat(releaseGroup.rating) } : { Count: 0, Value: null },
+      disambiguation: releaseGroup.disambiguation || '',
       genres: (genres || []).map(g => this.toTitleCase(g)),
+      id: releaseGroup.mbid,
+      images: images || [],
       links: links || [],
-      images: images || []
+      oldids: [],
+      overview: releaseGroup.overview || '',
+      rating: releaseGroup.rating ? { Count: 0, Value: parseFloat(releaseGroup.rating) } : { Count: 0, Value: null },
+      releasedate: releasedate || '0001-01-01',
+      releases: releases || [],
+      secondarytypes: secondaryTypes || [],
+      title: releaseGroup.title,
+      type: releaseGroup.primary_type || 'Other'
     };
   }
 
@@ -234,8 +261,13 @@ class LidarrFormatter {
       ORDER BY cover_type
     `, [entityType, entityMbid]);
 
-    // Smart URL detection - try multiple sources in order
     const serverUrl = this.getServerUrl();
+
+    // No images yet — return placeholder so Lidarr shows something
+    // while the image pipeline runs in the background
+    if (result.rows.length === 0) {
+      return [{ CoverType: 'Poster', Url: `${serverUrl}/assets/placeholder.png` }];
+    }
 
     return (result.rows || []).map(image => {
       // If image is cached locally, return local URL
@@ -290,6 +322,21 @@ class LidarrFormatter {
   }
 
   async getAlbumsForArtist(artistMbid) {
+    // Only return albums after fetch_artist_albums job has completed.
+    // Until then return empty list — Lidarr adds artist with zero albums.
+    // fetchArtistAlbums runs ensureAlbum for every release group, gets correct
+    // artist_credit from MB, then triggers a Lidarr refresh. Ghost albums
+    // never reach Lidarr because their artistid points to a different artist.
+    const jobDone = await database.query(
+      `SELECT 1 FROM metadata_jobs
+       WHERE job_type = 'fetch_artist_albums'
+       AND entity_mbid = $1
+       AND status = 'completed'
+       LIMIT 1`,
+      [artistMbid]
+    );
+    if (jobDone.rows.length === 0) return [];
+
     const result = await database.query(`
       SELECT
         rg.mbid,
@@ -300,10 +347,9 @@ class LidarrFormatter {
         rg.artist_credit,
         COALESCE(
           (
-            SELECT json_agg(DISTINCT r.status)
+            SELECT json_agg(DISTINCT COALESCE(r.status, 'Pseudo-Release'))
             FROM releases r
             WHERE r.release_group_mbid = rg.mbid
-            AND r.status IS NOT NULL
           ),
           '[]'::json
         ) as release_statuses
@@ -327,7 +373,7 @@ class LidarrFormatter {
         ReleaseStatuses: releaseStatuses || [],
         SecondaryTypes: secondaryTypes || [],
         Title: album.title,
-        Type: album.primary_type || 'Album'
+        Type: album.primary_type || 'Other',
       };
     });
   }
@@ -368,12 +414,12 @@ class LidarrFormatter {
         id: release.mbid,
         title: release.title,
         disambiguation: release.disambiguation || '',
-        status: release.status || 'Official',
+        status: release.status || 'Pseudo-Release',
         releasedate: release.release_date
           ? (release.release_date instanceof Date
               ? release.release_date.toISOString().split('T')[0]
               : String(release.release_date).split('T')[0])
-          : '',
+          : '0001-01-01',
         country: release.country ? [release.country] : [],
         label: labelNames || [],
         media: mediaOutput,

@@ -116,8 +116,34 @@ class ImageDownloadQueue {
   async _runDownload(imageId) {
     try {
       await imageDownloader.processDownload(imageId);
+
+      // Fire refresh check in background — don't let it stall the download loop
+      this._checkRefreshAsync(imageId).catch(err =>
+        logger.error(`Refresh check failed for image ${imageId}: ${err.message}`)
+      );
     } catch (error) {
       logger.error(`Download ${imageId} processing error: ${error.message}`);
+    }
+  }
+
+  async _checkRefreshAsync(imageId) {
+    const backgroundJobQueue = require('./backgroundJobQueue');
+    const imgResult = await database.query(
+      `SELECT entity_type, entity_mbid FROM images WHERE id = $1 AND cached = true`,
+      [imageId]
+    );
+    if (imgResult.rows.length === 0) return;
+    const { entity_type, entity_mbid } = imgResult.rows[0];
+    let artistMbid = entity_type === 'artist' ? entity_mbid : null;
+    if (!artistMbid) {
+      const argResult = await database.query(
+        `SELECT artist_mbid FROM artist_release_groups WHERE release_group_mbid = $1 LIMIT 1`,
+        [entity_mbid]
+      );
+      artistMbid = argResult.rows[0]?.artist_mbid || null;
+    }
+    if (artistMbid) {
+      await backgroundJobQueue._checkAndTriggerRefresh(artistMbid);
     }
   }
 

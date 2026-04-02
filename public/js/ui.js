@@ -2,11 +2,11 @@ const JOB_LABELS = {
     fetch_artist:        'Artist Metadata',
     fetch_artist_albums: 'Artist Albums',
     fetch_artist_wiki:   'Artist Bio',
-    fetch_artist_images: 'Artist Images',
+    fetch_artist_images: 'Artist Image URL',
     fetch_release:       'Release Data',
     fetch_album_full:    'Album Releases',
     fetch_album_wiki:    'Album Bio',
-    fetch_album_images:  'Album Images',
+    fetch_album_images:  'Album Image URL',
     artist_full:         'Full Artist Fetch',
     artist_releases:     'Artist Releases',
     release_tracks:      'Track Data',
@@ -118,8 +118,8 @@ const ui = {
             const imgSize = imgMb >= 1024
                 ? `${(imgMb / 1024).toFixed(1)} GB`
                 : `${imgMb} MB`;
-            document.getElementById('dashboardImageCount').innerHTML =
-                `${stats.database.images.toLocaleString()} <span style="font-size: 0.9rem; font-weight: normal; color: var(--text-secondary);">(${imgSize})</span>`;
+            document.getElementById('dashboardImageCount').textContent = stats.database.images.toLocaleString();
+            document.getElementById('dashboardImageSize').textContent = imgSize;
         } catch (error) {
             console.error('Failed to refresh dashboard stats:', error);
         }
@@ -1304,7 +1304,7 @@ const ui = {
 
     async refreshJobsCard() {
         try {
-            const response = await fetch('/api/jobs/recent');
+            const response = await fetch('/api/jobs/recent?type=metadata');
             const jobs = await response.json();
             const container = document.getElementById('jobQueueCard');
             if (!container) return;
@@ -1374,6 +1374,63 @@ const ui = {
         }
     },
 
+    async refreshDownloadJobsCard() {
+        try {
+            const response = await fetch('/api/jobs/recent?type=downloads');
+            const jobs = await response.json();
+            const container = document.getElementById('downloadJobsCard');
+            if (!container) return;
+
+            if (jobs.length === 0) {
+                container.innerHTML = '<div class="job-queue-empty">No downloads yet</div>';
+                return;
+            }
+
+            container.innerHTML = jobs.map(job => {
+                const isProcessing = job.status === 'processing';
+                const isFailed    = job.status === 'failed';
+                const isDone      = job.status === 'completed';
+                const barClass    = isFailed     ? 'job-bar-failed'
+                                  : isDone       ? 'job-bar-done'
+                                  : isProcessing ? 'job-bar-processing'
+                                  : 'job-bar-pending';
+                const fillPct = isDone || isFailed ? '100%' : isProcessing ? '60%' : '0%';
+                const displayName = job.entity_name || job.entity_mbid.substring(0, 8) + '...';
+                const artistPrefix = job.artist_name
+                    ? `<span class="job-artist-name">${this.escapeHtml(job.artist_name)}</span> — `
+                    : '';
+                const PROVIDER_LABELS = {
+                    coverartarchive: 'CoverArtArchive',
+                    fanart:          'Fanart.tv',
+                    deezer:          'Deezer',
+                    theaudiodb:      'TheAudioDB',
+                    manual:          'Manual'
+                };
+                const parts = [];
+                if (job.cover_type) parts.push(job.cover_type);
+                if (job.image_provider) parts.push(PROVIDER_LABELS[job.image_provider] || job.image_provider);
+                const detailHtml = parts.length > 0
+                    ? `<div class="job-counts"><span>${parts.join(' · ')}</span></div>`
+                    : '';
+
+                return `
+                    <div class="job-row">
+                        <div class="job-row-header">
+                            <span class="job-time">${new Date(job.created_at).toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + new Date(job.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
+                            <span class="job-label">${artistPrefix}${this.escapeHtml(displayName)} <span class="job-type-badge">Image Download</span></span>
+                            <span class="job-status job-status-${job.status}">${job.status}</span>
+                        </div>
+                        <div class="job-bar-track">
+                            <div class="job-bar ${barClass} ${isProcessing ? 'job-bar-animated' : ''}" style="width: ${fillPct}"></div>
+                        </div>
+                        ${detailHtml}
+                    </div>`;
+            }).join('');
+        } catch (error) {
+            console.error('Failed to refresh download jobs:', error);
+        }
+    },
+
     async refreshConnectionsCard() {
         try {
             const response = await fetch('/api/requests/recent');
@@ -1418,6 +1475,18 @@ const ui = {
             }).join('');
         } catch (error) {
             console.error('Failed to refresh connections:', error);
+        }
+    },
+
+    async clearDownloadQueue() {
+        if (!confirm('Mark all pending downloads as failed?')) return;
+        try {
+            const response = await fetch('/api/downloads/clear', { method: 'POST' });
+            const data = await response.json();
+            this.showSuccess(`Cleared ${data.cleared} pending downloads`);
+            await this.refreshDownloadJobsCard();
+        } catch (e) {
+            this.showError('Failed to clear download queue');
         }
     },
 
@@ -1498,6 +1567,7 @@ const ui = {
         const pollJobs = async () => {
             if (document.getElementById('dashboard-tab').classList.contains('active')) {
                 await this.refreshJobsCard();
+                await this.refreshDownloadJobsCard();
             }
             const interval = this.jobsHasActive ? 1000 : 5000;
             this.jobsRefreshTimeout = setTimeout(pollJobs, interval);

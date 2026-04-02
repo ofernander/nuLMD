@@ -1,7 +1,6 @@
 const { registry } = require('./providerRegistry');
 const metaHandler = require('./metaHandler');
 const { logger } = require('./logger');
-const lidarrClient = require('./lidarrClient');
 
 const MAX_ITEM_RETRIES = 10;
 
@@ -63,232 +62,44 @@ async function processJob(job) {
   logger.info(`Processing ${job_type} job for ${entity_mbid}`);
 
   switch (job_type) {
-    // Legacy job types
-    case 'artist_full':
-      await fetchArtistFull(entity_mbid);
-      break;
-    
-    case 'artist_releases':
-      await fetchArtistReleases(entity_mbid, metadata);
-      break;
-    
-    case 'release_tracks':
-      await fetchReleaseTracks(entity_mbid);
-      break;
-    
-    // New Lidarr-specific job types
-    case 'fetch_artist':
-      await fetchArtistBasic(entity_mbid);
-      break;
-    
     case 'fetch_artist_albums':
-      await fetchArtistAlbums(entity_mbid);
+      await fetchArtistAlbums(job);
       break;
-    
-    case 'fetch_release':
-      await fetchReleaseFull(entity_mbid, metadata);
-      break;
-    
+
     case 'fetch_album_full':
       await fetchAlbumFull(entity_mbid);
       break;
-    
-    case 'download_image':
-      // Image download job - metadata contains imageId
-      const imageDownloader = require('./imageDownloader');
-      await imageDownloader.processDownload(metadata.imageId);
-      break;
-    
+
     default:
       throw new Error(`Unknown job type: ${job_type}`);
   }
 }
 
 /**
- * Fetch complete artist data including all releases
- */
-async function fetchArtistFull(artistMbid) {
-  const mbProvider = registry.getProvider('musicbrainz');
-  
-  // Fetch artist details
-  const artistData = await mbProvider.getArtist(artistMbid);
-  await metaHandler.storeArtist(artistMbid, artistData, true);
-  
-  // Now fetch all releases with paging
-  await fetchArtistReleases(artistMbid);
-}
-
-/**
- * Fetch all releases for an artist, paging through results
- * MB limits responses to ~500 tracks total, so we need to page
- * Now with delta updates - only fetches NEW releases
- */
-async function fetchArtistReleases(artistMbid, metadata) {
-  const BLOCKED = new Set(['89ad4ac3-39f7-470e-963a-56509c546377', 'fe5b7087-438f-4e6e-bf3d-4a5b65e8d8b6']);
-  if (BLOCKED.has(artistMbid)) {
-    logger.info(`fetchArtistReleases: skipping blocked entity ${artistMbid}`);
-    return;
-  }
-
-  const database = require('../sql/database');
-  const mbProvider = registry.getProvider('musicbrainz');
-  
-  // Mark fetch as started
-  await database.markArtistFetchStarted(artistMbid);
-  
-  let offset = (metadata && metadata.offset) ? metadata.offset : 0;
-  let totalFetched = 0;
-  let hasMore = true;
-  let allMBReleaseIds = []; // Track all release IDs from MusicBrainz
-  
-  while (hasMore) {
-    logger.info(`Fetching releases for artist ${artistMbid}, offset ${offset}`);
-    
-    // Browse releases for this artist
-    const releases = await mbProvider.browseReleases(artistMbid, {
-      offset,
-      limit: 100,
-      inc: 'release-groups+artist-credits+labels+media+recordings'
-    });
-    
-    if (!releases || releases.length === 0) {
-      hasMore = false;
-      break;
-    }
-    
-    // Track all MB release IDs
-    allMBReleaseIds.push(...releases.map(r => r.id));
-    
-    // Store each release
-    for (const release of releases) {
-      try {
-        const releaseGroup = release['release-group'];
-
-        // Ensure the release-group exists
-        if (releaseGroup && releaseGroup.id) {
-          // Only process release groups where this artist appears in the release group
-          // artist credit. MB browse-releases returns ALL releases where the artist
-          // appears in any capacity (track features etc) — skip those.
-          const rgArtistCredit = releaseGroup['artist-credit'] || [];
-          const artistInCredit = rgArtistCredit.some(c => c.artist?.id === artistMbid);
-          if (rgArtistCredit.length > 0 && !artistInCredit) {
-            logger.info(`Skipping release ${release.id} - artist ${artistMbid} not in release group ${releaseGroup.id} artist credit`);
-            continue;
-          }
-
-          // Check if release-group exists, if not create it
-          const rgExists = await metaHandler.checkReleaseGroupExists(releaseGroup.id);
-          if (!rgExists) {
-            // Normalize the date
-            let releaseDate = releaseGroup['first-release-date'] || release.date;
-            if (releaseDate) {
-              if (releaseDate.length === 4) {
-                releaseDate = `${releaseDate}-01-01`; // Year only
-              } else if (releaseDate.length === 7) {
-                releaseDate = `${releaseDate}-01`; // Year-Month
-              }
-            }
-            
-            // Store basic release-group info (we'll fetch full details later if needed)
-            await metaHandler.storeReleaseGroup(releaseGroup.id, {
-              title: releaseGroup.title || release.title,
-              primaryType: releaseGroup['primary-type'] || 'Album',
-              secondaryTypes: releaseGroup['secondary-types'] || [],
-              firstReleaseDate: releaseDate,
-              disambiguation: releaseGroup.disambiguation || '',
-              artistCredit: releaseGroup['artist-credit'] || release['artist-credit'] || []
-            }, artistMbid, { force: true });
-          }
-        }
-        
-        // Now store the release
-        await metaHandler.storeRelease(release.id, release);
-      } catch (error) {
-        logger.error(`Failed to store release ${release.id}:`, error);
-        // Continue with next release
-      }
-    }
-    
-    totalFetched += releases.length;
-    offset += releases.length; // MB docs say to increment by number returned, not limit
-    
-    logger.info(`Fetched ${releases.length} releases (${totalFetched} total so far) for artist ${artistMbid}`);
-  }
-  
-  // Now fetch full release-group data (tags, genres, rating, aliases, links)
-  // Get unique release-groups from what we just stored
-  const releaseGroups = await metaHandler.getArtistReleaseGroups(artistMbid);
-  
-  logger.info(`Fetching full data for ${releaseGroups.length} release-groups`);
-  
-  const failedReleaseGroups = [];
-
-  // First pass: try all release-groups
-  for (const rgMbid of releaseGroups) {
-    try {
-      const fullRgData = await mbProvider.getAlbum(rgMbid);
-      await metaHandler.storeReleaseGroup(rgMbid, fullRgData, artistMbid, { force: true });
-    } catch (error) {
-      logger.warn(`Failed to fetch release-group ${rgMbid} (will retry): ${error.message}`);
-      failedReleaseGroups.push(rgMbid);
-    }
-  }
-
-  // Retry failed release-groups
-  const stillFailed = failedReleaseGroups.length > 0
-    ? await retryFailed(failedReleaseGroups, async (rgMbid) => {
-        const fullRgData = await mbProvider.getAlbum(rgMbid);
-        await metaHandler.storeReleaseGroup(rgMbid, fullRgData, artistMbid, { force: true });
-      }, 'release-group')
-    : [];
-
-  const successCount = releaseGroups.length - stillFailed.length;
-  logger.info(`Completed fetching ${totalFetched} releases and ${successCount}/${releaseGroups.length} release-groups for artist ${artistMbid}`);
-  
-  // Mark fetch as complete
-  await database.markArtistFetchComplete(artistMbid, allMBReleaseIds.length);
-}
-
-/**
- * Fetch complete track data for a release
- */
-async function fetchReleaseTracks(releaseMbid) {
-  const mbProvider = registry.getProvider('musicbrainz');
-  
-  const releaseData = await mbProvider.getRelease(releaseMbid);
-  await metaHandler.storeRelease(releaseMbid, releaseData);
-}
-
-/**
- * Fetch basic artist data (for track artists)
- */
-async function fetchArtistBasic(artistMbid) {
-  const mbProvider = registry.getProvider('musicbrainz');
-  
-  logger.info(`Fetching basic artist data for ${artistMbid}`);
-  const artistData = await mbProvider.getArtist(artistMbid);
-  await metaHandler.storeArtist(artistMbid, artistData, false);
-}
-
-/**
  * Fetch all albums for an artist
  */
-async function fetchArtistAlbums(artistMbid) {
+async function fetchArtistAlbums(job) {
+  const artistMbid = job.entity_mbid;
+  const rootJobId = job.id;
+  const skipArtistImages = job.metadata?.skipArtistImages || false;
+  const skipAlbumImages  = job.metadata?.skipAlbumImages  || false;
+  const forceRefresh     = job.metadata?.forceRefresh     || false;
+
   const BLOCKED = new Set(['89ad4ac3-39f7-470e-963a-56509c546377', 'fe5b7087-438f-4e6e-bf3d-4a5b65e8d8b6']);
   if (BLOCKED.has(artistMbid)) {
     logger.info(`fetchArtistAlbums: skipping blocked entity ${artistMbid}`);
     return;
   }
 
-  const mbProvider = registry.getProvider('musicbrainz');
   const database = require('../sql/database');
+  const backgroundJobQueue = require('./backgroundJobQueue');
 
   // Get all release groups already stored for this artist
   const releaseGroups = await metaHandler.getArtistReleaseGroups(artistMbid);
 
   // Safety: refuse to process artists with absurd album counts
-  if (releaseGroups.length > 500) {
-    logger.warn(`fetchArtistAlbums: artist ${artistMbid} has ${releaseGroups.length} release groups, exceeds safety limit of 500, skipping`);
+  if (releaseGroups.length > 2000) {
+    logger.warn(`fetchArtistAlbums: artist ${artistMbid} has ${releaseGroups.length} release groups, exceeds safety limit of 2000, skipping`);
     return;
   }
 
@@ -298,26 +109,28 @@ async function fetchArtistAlbums(artistMbid) {
   const failedAlbums = [];
 
   for (const rgMbid of releaseGroups) {
-    // Skip if already has releases
-    const existing = await database.query(
-      'SELECT mbid FROM releases WHERE release_group_mbid = $1 LIMIT 1',
-      [rgMbid]
-    );
-    if (existing.rows.length > 0) continue;
-
     try {
-      const releases = await mbProvider.getReleasesByReleaseGroup(rgMbid);
-      const officialReleases = releases.filter(r => r.status === 'Official');
-      const toFetch = officialReleases.length > 0 ? officialReleases : releases;
-
-      for (const release of toFetch) {
-        const fullRelease = await mbProvider.getRelease(release.id);
-        await metaHandler.storeRelease(release.id, fullRelease);
-      }
+      const { needsFullFetch } = await metaHandler.ensureAlbum(rgMbid, forceRefresh);
       fetched++;
-      logger.info(`Background: stored ${toFetch.length} releases for album ${rgMbid} (${fetched} albums processed)`);
+      logger.info(`Background: ensureAlbum complete for ${rgMbid} (${fetched} albums processed)`);
+
+      // Queue fetch_album_full as tree child if album has remaining releases
+      if (needsFullFetch) {
+        const fullFetchQueueFn = forceRefresh
+          ? backgroundJobQueue.forceQueueJob.bind(backgroundJobQueue)
+          : backgroundJobQueue.queueJob.bind(backgroundJobQueue);
+        await fullFetchQueueFn('fetch_album_full', 'release_group', rgMbid, 1, null, rootJobId, artistMbid);
+        logger.info(`Queued tree fetch_album_full for album ${rgMbid}`);
+      }
+
+      // Queue wiki and image jobs for this album as tree children
+      const albumWikiQueueFn = forceRefresh ? backgroundJobQueue.forceQueueJob.bind(backgroundJobQueue) : backgroundJobQueue.queueJob.bind(backgroundJobQueue);
+      await albumWikiQueueFn('fetch_album_wiki', 'release_group', rgMbid, 1, forceRefresh ? { forceRefresh: true } : null, rootJobId, artistMbid);
+      if (!skipAlbumImages && backgroundJobQueue.hasAlbumImageProvider()) {
+        await backgroundJobQueue.queueJob('fetch_album_images', 'release_group', rgMbid, 1, null, rootJobId, artistMbid);
+      }
     } catch (error) {
-      logger.warn(`Background: failed to fetch releases for album ${rgMbid}: ${error.message}`);
+      logger.warn(`Background: failed to ensure album ${rgMbid}: ${error.message}`);
       failedAlbums.push(rgMbid);
     }
   }
@@ -325,38 +138,29 @@ async function fetchArtistAlbums(artistMbid) {
   // Retry failures
   if (failedAlbums.length > 0) {
     await retryFailed(failedAlbums, async (rgMbid) => {
-      const releases = await mbProvider.getReleasesByReleaseGroup(rgMbid);
-      const officialReleases = releases.filter(r => r.status === 'Official');
-      const toFetch = officialReleases.length > 0 ? officialReleases : releases;
-      for (const release of toFetch) {
-        const fullRelease = await mbProvider.getRelease(release.id);
-        await metaHandler.storeRelease(release.id, fullRelease);
+      const { needsFullFetch } = await metaHandler.ensureAlbum(rgMbid, forceRefresh);
+      if (needsFullFetch) {
+        const retryFullFetchQueueFn = forceRefresh
+          ? backgroundJobQueue.forceQueueJob.bind(backgroundJobQueue)
+          : backgroundJobQueue.queueJob.bind(backgroundJobQueue);
+        await retryFullFetchQueueFn('fetch_album_full', 'release_group', rgMbid, 1, null, rootJobId, artistMbid);
+      }
+      const retryAlbumWikiQueueFn = forceRefresh ? backgroundJobQueue.forceQueueJob.bind(backgroundJobQueue) : backgroundJobQueue.queueJob.bind(backgroundJobQueue);
+      await retryAlbumWikiQueueFn('fetch_album_wiki', 'release_group', rgMbid, 1, forceRefresh ? { forceRefresh: true } : null, rootJobId, artistMbid);
+      if (!skipAlbumImages && backgroundJobQueue.hasAlbumImageProvider()) {
+        await backgroundJobQueue.queueJob('fetch_album_images', 'release_group', rgMbid, 1, null, rootJobId, artistMbid);
       }
     }, 'album-releases');
   }
 
   logger.info(`Background: completed fetching releases for artist ${artistMbid}: ${fetched} albums processed, ${failedAlbums.length} failed`);
 
-  // Trigger Lidarr to re-read metadata for this artist
-  if (lidarrClient.enabled) {
-    const result = await lidarrClient.refreshArtistByMbid(artistMbid);
-    if (result.success) {
-      logger.info(`Lidarr refresh triggered for artist ${artistMbid} — command ID ${result.commandId}`);
-    } else if (!result.skipped) {
-      logger.warn(`Lidarr refresh failed for artist ${artistMbid}: ${result.error}`);
-    }
+  // Queue artist wiki and image jobs as tree children
+  const artistWikiQueueFn = forceRefresh ? backgroundJobQueue.forceQueueJob.bind(backgroundJobQueue) : backgroundJobQueue.queueJob.bind(backgroundJobQueue);
+  await artistWikiQueueFn('fetch_artist_wiki', 'artist', artistMbid, 1, forceRefresh ? { forceRefresh: true } : null, rootJobId, artistMbid);
+  if (!skipArtistImages && backgroundJobQueue.hasArtistImageProvider()) {
+    await backgroundJobQueue.queueJob('fetch_artist_images', 'artist', artistMbid, 1, null, rootJobId, artistMbid);
   }
-}
-
-/**
- * Fetch full release data with tracks
- */
-async function fetchReleaseFull(releaseMbid, metadata) {
-  const mbProvider = registry.getProvider('musicbrainz');
-  
-  logger.info(`Fetching full release data for ${releaseMbid}`);
-  const releaseData = await mbProvider.getRelease(releaseMbid);
-  await metaHandler.storeRelease(releaseMbid, releaseData);
 }
 
 /**
@@ -387,7 +191,7 @@ async function fetchAlbumFull(releaseGroupMbid) {
 
   const remainingReleases = allReleases.filter(r => {
     const alreadyFetched = storedMbids.has(r.id);
-    const matchesFilter = statusFilter.length === 0 || statusFilter.includes(r.status || 'Official');
+    const matchesFilter = statusFilter.length === 0 || statusFilter.includes(r.status || 'Pseudo-Release');
     return !alreadyFetched && matchesFilter;
   });
 

@@ -79,11 +79,22 @@ router.post('/jobs/clear', async (req, res, next) => {
 router.post('/jobs/kill-active', async (req, res, next) => {
   try {
     const result = await database.query(
-      `UPDATE metadata_jobs SET status = 'failed', error_message = 'Killed by user'
+      `UPDATE metadata_jobs SET status = 'failed', error_message = 'Killed by user', attempts = max_attempts
        WHERE status = 'processing' RETURNING id`
     );
     logger.info(`Killed ${result.rows.length} active jobs`);
     res.json({ success: true, killed: result.rows.length });
+  } catch (error) { next(error); }
+});
+
+router.post('/downloads/clear', async (req, res, next) => {
+  try {
+    const result = await database.query(
+      `UPDATE images SET cache_failed = true, cache_failed_reason = 'Cleared by user'
+       WHERE cached = false AND cache_failed = false RETURNING id`
+    );
+    logger.info(`Cleared ${result.rows.length} pending downloads`);
+    res.json({ success: true, cleared: result.rows.length });
   } catch (error) { next(error); }
 });
 
@@ -189,9 +200,9 @@ router.get('/artist/:mbid', async (req, res, next) => {
       const ttlExpired = artist.ttl_expires_at && new Date(artist.ttl_expires_at) < now;
       
       if (ttlExpired) {
-        backgroundJobQueue.queueJob('artist_full', 'artist', mbid, 5)
+        backgroundJobQueue.queueJob('fetch_artist_albums', 'artist', mbid, 5, null, null, mbid)
           .catch(err => logger.error(`Failed to queue refresh for artist ${mbid}:`, err));
-        logger.info(`Artist ${mbid} TTL expired, queued background refresh, serving stale data`);
+        logger.info(`Artist ${mbid} TTL expired, queued fetch_artist_albums, serving stale data`);
       }
       
       // Update access tracking
@@ -200,33 +211,16 @@ router.get('/artist/:mbid', async (req, res, next) => {
       // Return formatted data
       const formatted = await lidarr.formatArtist(mbid);
 
-      if (!artist.overview) {
-        const wikiDone = await database.query(
-          `SELECT 1 FROM metadata_jobs WHERE job_type = 'fetch_artist_wiki' AND entity_mbid = $1 AND status = 'completed' LIMIT 1`,
-          [mbid]
-        );
-        if (wikiDone.rows.length === 0) {
-          await backgroundJobQueue.queueJob('fetch_artist_wiki', 'artist', mbid, 1);
-        } else {
-          logger.info(`Wiki already fetched for artist ${mbid}, skipping`);
-        }
-      }
-      if (backgroundJobQueue.hasArtistImageProvider()) {
-        await backgroundJobQueue.queueJob('fetch_artist_images', 'artist', mbid, 1);
-      }
-
       return res.json(formatted);
     }
 
     // No data at all - fetch artist immediately
     logger.info(`Artist ${mbid} not in DB, fetching from MusicBrainz`);
     await metaHandler.getArtist(mbid);
-    
-    // Always queue wiki for brand new artists
-    await backgroundJobQueue.queueJob('fetch_artist_wiki', 'artist', mbid, 1);
-    if (backgroundJobQueue.hasArtistImageProvider()) {
-      await backgroundJobQueue.queueJob('fetch_artist_images', 'artist', mbid, 1);
-    }
+
+    // Queue fetch_artist_albums as the root job — spawns wiki/image children and
+    // triggers Lidarr refresh when the entire tree completes.
+    await backgroundJobQueue.queueJob('fetch_artist_albums', 'artist', mbid, 5, null, null, mbid);
 
     // Return formatted data
     const formatted = await lidarr.formatArtist(mbid);
@@ -287,39 +281,6 @@ router.get('/search/album', async (req, res, next) => {
     }
 
     res.json(results);
-  } catch (error) {
-    next(error);
-  }
-});
-
-// Old album endpoints - kept for backwards compatibility
-router.get('/album/:provider/:id', async (req, res, next) => {
-  try {
-    const { provider, id } = req.params;
-
-    const p = registry.getProvider(provider);
-    if (!p) {
-      return res.status(404).json({ error: `Provider ${provider} not found or not enabled` });
-    }
-
-    const album = await p.getAlbum(id);
-    res.json(album);
-  } catch (error) {
-    next(error);
-  }
-});
-
-router.get('/album/:provider/:id/tracks', async (req, res, next) => {
-  try {
-    const { provider, id } = req.params;
-
-    const p = registry.getProvider(provider);
-    if (!p) {
-      return res.status(404).json({ error: `Provider ${provider} not found or not enabled` });
-    }
-
-    const tracks = await p.getAlbumTracks(id);
-    res.json(tracks);
   } catch (error) {
     next(error);
   }
@@ -658,7 +619,7 @@ router.post('/images/fetch/artist-albums/:mbid', async (req, res, next) => {
       [mbid]
     );
     for (const row of albums.rows) {
-      await backgroundJobQueue.forceQueueJob('fetch_album_images', 'release_group', row.release_group_mbid, 5);
+      await backgroundJobQueue.forceQueueJob('fetch_album_images', 'release_group', row.release_group_mbid, 5, { force: true });
     }
     logger.info(`Album image fetch queued for ${albums.rows.length} albums of artist ${mbid}`);
     res.json({ success: true, queued: albums.rows.length });
@@ -668,7 +629,7 @@ router.post('/images/fetch/artist-albums/:mbid', async (req, res, next) => {
 router.post('/images/fetch/artist/:mbid', async (req, res, next) => {
   try {
     const { mbid } = req.params;
-    await backgroundJobQueue.forceQueueJob('fetch_artist_images', 'artist', mbid, 5);
+    await backgroundJobQueue.forceQueueJob('fetch_artist_images', 'artist', mbid, 5, { force: true });
     logger.info(`Image fetch queued for artist ${mbid}`);
     res.json({ success: true });
   } catch (error) { next(error); }
@@ -677,7 +638,7 @@ router.post('/images/fetch/artist/:mbid', async (req, res, next) => {
 router.post('/images/fetch/album/:mbid', async (req, res, next) => {
   try {
     const { mbid } = req.params;
-    await backgroundJobQueue.forceQueueJob('fetch_album_images', 'release_group', mbid, 5);
+    await backgroundJobQueue.forceQueueJob('fetch_album_images', 'release_group', mbid, 5, { force: true });
     logger.info(`Image fetch queued for album ${mbid}`);
     res.json({ success: true });
   } catch (error) { next(error); }
@@ -724,8 +685,8 @@ router.get('/images/:entity_type/:mbid/:filename([^/]+[.][^/]+)', async (req, re
 router.post('/ui/fetch-artist/:mbid', async (req, res, next) => {
   try {
     const { mbid } = req.params;
-    await backgroundJobQueue.queueJob('artist_full', 'artist', mbid, 10);
-    await backgroundJobQueue.queueJob('fetch_artist_albums', 'artist', mbid, 9);
+    // fetch_artist_albums is the root job — spawns all children and triggers Lidarr refresh on completion
+    await backgroundJobQueue.forceQueueJob('fetch_artist_albums', 'artist', mbid, 10, { skipArtistImages: true, skipAlbumImages: true, forceRefresh: true }, null, mbid);
     logger.info(`UI artist fetch queued for ${mbid}`);
     res.json({ success: true, message: `Fetch queued for ${mbid}` });
   } catch (error) {
@@ -794,14 +755,23 @@ router.post('/lidarr/refresh/:mbid', async (req, res, next) => {
 });
 
 // Recent jobs endpoint (unified: metadata jobs + image downloads)
+// ?type=metadata — metadata jobs only
+// ?type=downloads — image download rows only
+// (no param) — all
 router.get('/jobs/recent', async (req, res, next) => {
   try {
-    const result = await database.query(`
-      SELECT * FROM (
-        -- Metadata jobs
-        SELECT 
+    const { type } = req.query;
+    const includeMetadata = !type || type === 'metadata';
+    const includeDownloads = !type || type === 'downloads';
+
+    const parts = [];
+
+    if (includeMetadata) {
+      parts.push(`
+        SELECT
           j.id, j.job_type, j.entity_type, j.entity_mbid, j.status,
           j.created_at, j.started_at, j.completed_at, j.error_message,
+          j.root_artist_mbid, j.parent_job_id,
           COALESCE(a.name, rg.title) as entity_name,
           CASE
             WHEN j.entity_type != 'artist' THEN
@@ -823,7 +793,7 @@ router.get('/jobs/recent', async (req, res, next) => {
                JOIN artist_release_groups arg ON arg.release_group_mbid = rg2.mbid
                WHERE arg.artist_mbid = j.entity_mbid)
             ELSE 0
-          END as album_count,
+          END::bigint as album_count,
           CASE
             WHEN j.entity_type = 'artist' THEN
               (SELECT COUNT(*) FROM releases r
@@ -832,7 +802,7 @@ router.get('/jobs/recent', async (req, res, next) => {
                WHERE arg2.artist_mbid = j.entity_mbid)
             ELSE
               (SELECT COUNT(*) FROM releases r WHERE r.release_group_mbid = j.entity_mbid)
-          END as release_count,
+          END::bigint as release_count,
           CASE
             WHEN j.entity_type = 'artist' THEN
               (SELECT COUNT(DISTINCT t.recording_mbid) FROM tracks t
@@ -844,17 +814,17 @@ router.get('/jobs/recent', async (req, res, next) => {
               (SELECT COUNT(DISTINCT t.recording_mbid) FROM tracks t
                JOIN releases r3 ON r3.mbid = t.release_mbid
                WHERE r3.release_group_mbid = j.entity_mbid)
-          END as track_count,
-          NULL as cover_type,
-          NULL as image_provider
+          END::bigint as track_count,
+          NULL::text as cover_type,
+          NULL::text as image_provider
         FROM metadata_jobs j
         LEFT JOIN artists a ON a.mbid = j.entity_mbid
         LEFT JOIN release_groups rg ON rg.mbid = j.entity_mbid
-        WHERE j.status IN ('processing', 'pending', 'completed', 'failed')
+        WHERE j.status IN ('processing', 'pending', 'completed', 'failed')`);
+    }
 
-        UNION ALL
-
-        -- Pending image downloads
+    if (includeDownloads) {
+      parts.push(`
         SELECT
           i.id,
           'image_download' as job_type,
@@ -862,9 +832,10 @@ router.get('/jobs/recent', async (req, res, next) => {
           i.entity_mbid,
           'pending' as status,
           i.last_verified_at as created_at,
-          NULL as started_at,
-          NULL as completed_at,
-          NULL as error_message,
+          NULL::timestamptz as started_at,
+          NULL::timestamptz as completed_at,
+          NULL::text as error_message,
+          NULL::uuid as root_artist_mbid, NULL::bigint as parent_job_id,
           COALESCE(a2.name, rg2.title) as entity_name,
           CASE
             WHEN i.entity_type != 'artist' THEN
@@ -874,47 +845,48 @@ router.get('/jobs/recent', async (req, res, next) => {
                LIMIT 1)
             ELSE NULL
           END as artist_name,
-          0 as album_count, 0 as release_count, 0 as track_count,
+          0::bigint as album_count, 0::bigint as release_count, 0::bigint as track_count,
           i.cover_type,
           i.provider as image_provider
         FROM images i
         LEFT JOIN artists a2 ON a2.mbid = i.entity_mbid
         LEFT JOIN release_groups rg2 ON rg2.mbid = i.entity_mbid
-        WHERE i.cached = false AND i.cache_failed = false
+        WHERE i.cached = false AND i.cache_failed = false`);
 
-        UNION ALL
+      parts.push(`
+        SELECT * FROM (
+          SELECT
+            i.id,
+            'image_download' as job_type,
+            i.entity_type,
+            i.entity_mbid,
+            'completed' as status,
+            i.last_verified_at as created_at,
+            NULL::timestamptz as started_at,
+            i.cached_at as completed_at,
+            NULL::text as error_message,
+            NULL::uuid as root_artist_mbid, NULL::bigint as parent_job_id,
+            COALESCE(a3.name, rg3.title) as entity_name,
+            CASE
+              WHEN i.entity_type != 'artist' THEN
+                (SELECT ar3.name FROM artists ar3
+                 JOIN artist_release_groups arg5 ON arg5.artist_mbid = ar3.mbid
+                 WHERE arg5.release_group_mbid = i.entity_mbid
+                 LIMIT 1)
+              ELSE NULL
+            END as artist_name,
+            0::bigint as album_count, 0::bigint as release_count, 0::bigint as track_count,
+            i.cover_type,
+            i.provider as image_provider
+          FROM images i
+          LEFT JOIN artists a3 ON a3.mbid = i.entity_mbid
+          LEFT JOIN release_groups rg3 ON rg3.mbid = i.entity_mbid
+          WHERE i.cached = true
+          ORDER BY i.cached_at DESC
+          LIMIT 50
+        ) recent_completed`);
 
-        -- Recently completed image downloads (last 5 minutes)
-        SELECT
-          i.id,
-          'image_download' as job_type,
-          i.entity_type,
-          i.entity_mbid,
-          'completed' as status,
-          i.last_verified_at as created_at,
-          NULL as started_at,
-          i.cached_at as completed_at,
-          NULL as error_message,
-          COALESCE(a3.name, rg3.title) as entity_name,
-          CASE
-            WHEN i.entity_type != 'artist' THEN
-              (SELECT ar3.name FROM artists ar3
-               JOIN artist_release_groups arg5 ON arg5.artist_mbid = ar3.mbid
-               WHERE arg5.release_group_mbid = i.entity_mbid
-               LIMIT 1)
-            ELSE NULL
-          END as artist_name,
-          0 as album_count, 0 as release_count, 0 as track_count,
-          i.cover_type,
-          i.provider as image_provider
-        FROM images i
-        LEFT JOIN artists a3 ON a3.mbid = i.entity_mbid
-        LEFT JOIN release_groups rg3 ON rg3.mbid = i.entity_mbid
-        WHERE i.cached = true
-
-        UNION ALL
-
-        -- Recently failed image downloads (last 5 minutes)
+      parts.push(`
         SELECT
           i.id,
           'image_download' as job_type,
@@ -922,9 +894,10 @@ router.get('/jobs/recent', async (req, res, next) => {
           i.entity_mbid,
           'failed' as status,
           i.last_verified_at as created_at,
-          NULL as started_at,
-          NULL as completed_at,
+          NULL::timestamptz as started_at,
+          NULL::timestamptz as completed_at,
           i.cache_failed_reason as error_message,
+          NULL::uuid as root_artist_mbid, NULL::bigint as parent_job_id,
           COALESCE(a4.name, rg4.title) as entity_name,
           CASE
             WHEN i.entity_type != 'artist' THEN
@@ -934,13 +907,18 @@ router.get('/jobs/recent', async (req, res, next) => {
                LIMIT 1)
             ELSE NULL
           END as artist_name,
-          0 as album_count, 0 as release_count, 0 as track_count,
+          0::bigint as album_count, 0::bigint as release_count, 0::bigint as track_count,
           i.cover_type,
           i.provider as image_provider
         FROM images i
         LEFT JOIN artists a4 ON a4.mbid = i.entity_mbid
         LEFT JOIN release_groups rg4 ON rg4.mbid = i.entity_mbid
-        WHERE i.cache_failed = true
+        WHERE i.cache_failed = true`);
+    }
+
+    const sql = `
+      SELECT * FROM (
+        ${parts.join('\n        UNION ALL\n')}
       ) combined
       ORDER BY
         CASE status
@@ -950,7 +928,9 @@ router.get('/jobs/recent', async (req, res, next) => {
         END ASC,
         created_at DESC
       LIMIT 100
-    `);
+    `;
+
+    const result = await database.query(sql);
     res.json(result.rows);
   } catch (error) {
     next(error);

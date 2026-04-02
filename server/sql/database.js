@@ -86,6 +86,44 @@ class Database {
     await this.query(`
       CREATE INDEX IF NOT EXISTS idx_request_log_timestamp ON request_log(timestamp DESC)
     `);
+
+    // Phase 1: Job tree support — add parent_job_id and root_artist_mbid
+    await this.query(`
+      ALTER TABLE metadata_jobs
+        ADD COLUMN IF NOT EXISTS parent_job_id BIGINT REFERENCES metadata_jobs(id) ON DELETE SET NULL,
+        ADD COLUMN IF NOT EXISTS root_artist_mbid UUID;
+    `);
+
+    // Drop old single unique constraint if it still exists (replaced by two partial indexes)
+    await this.query(`
+      ALTER TABLE metadata_jobs
+        DROP CONSTRAINT IF EXISTS unique_job;
+    `);
+
+    // Standalone jobs unique index (no root artist)
+    await this.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_standalone
+        ON metadata_jobs(job_type, entity_mbid)
+        WHERE root_artist_mbid IS NULL;
+    `);
+
+    // Tree jobs unique index (scoped to root artist)
+    await this.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_tree
+        ON metadata_jobs(job_type, entity_mbid, root_artist_mbid)
+        WHERE root_artist_mbid IS NOT NULL;
+    `);
+
+    await this.query(`
+      CREATE INDEX IF NOT EXISTS idx_metadata_jobs_parent
+        ON metadata_jobs(parent_job_id);
+    `);
+
+    await this.query(`
+      CREATE INDEX IF NOT EXISTS idx_metadata_jobs_root_artist
+        ON metadata_jobs(root_artist_mbid)
+        WHERE root_artist_mbid IS NOT NULL;
+    `);
     
     logger.info('Column migrations complete');
   }

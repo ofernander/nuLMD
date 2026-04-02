@@ -164,31 +164,50 @@ class LidarrClient {
       return { success: false, skipped: true, error: 'Lidarr integration disabled' };
     }
 
-    const lidarrId = await this.getLidarrId(mbid);
+    let lidarrId = await this.getLidarrId(mbid);
     if (!lidarrId) {
-      logger.debug(`Lidarr-Client: artist ${mbid} not found in Lidarr — skipping refresh`);
-      return { success: false, skipped: true, error: 'Artist not in Lidarr' };
+      // Force a fresh map refresh and retry once — artist may have just been added
+      await this.refreshArtistMap();
+      lidarrId = this.artistMap.get(mbid)?.id;
+      if (!lidarrId) {
+        logger.warn(`Lidarr-Client: artist ${mbid} not found in Lidarr after map refresh — skipping refresh`);
+        return { success: false, skipped: true, error: 'Artist not in Lidarr' };
+      }
     }
 
     return this.refreshArtist(lidarrId);
   }
 
   /**
-   * Get command status from Lidarr.
-   * @param {number} commandId
-   * @returns {Promise<{status: string, error?: string}>}
+   * Poll Lidarr until the artist appears, then trigger refresh.
+   * Polls every 15s for up to 10 minutes before giving up.
+   * Fire-and-forget — does not block the caller.
    */
-  async getCommandStatus(commandId) {
-    if (!this.client) {
-      return { status: 'unknown', error: 'Client not initialized' };
+  async waitForArtistAndRefresh(mbid) {
+    if (!this.enabled || !this.client) {
+      logger.warn(`Lidarr-Client: waitForArtistAndRefresh called but client not ready for ${mbid}`);
+      return;
     }
 
-    try {
-      const response = await this.client.get(`/command/${commandId}`);
-      return { status: response.data?.status || 'unknown' };
-    } catch (error) {
-      return { status: 'unknown', error: this._formatError(error) };
+    const MAX_ATTEMPTS = 40; // 40 x 15s = 10 minutes
+    const INTERVAL_MS = 15000;
+
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        await this.refreshArtistMap();
+        const lidarrId = this.artistMap.get(mbid)?.id;
+        if (lidarrId) {
+          logger.info(`Lidarr-Client: artist ${mbid} found in Lidarr (attempt ${attempt}) — triggering refresh`);
+          return this.refreshArtist(lidarrId);
+        }
+      } catch (err) {
+        logger.warn(`Lidarr-Client: poll failed for ${mbid}: ${err.message}`);
+      }
+      logger.info(`Lidarr-Client: artist ${mbid} not in Lidarr yet (attempt ${attempt}/${MAX_ATTEMPTS}), retrying in ${INTERVAL_MS / 1000}s`);
+      await new Promise(r => setTimeout(r, INTERVAL_MS));
     }
+
+    logger.warn(`Lidarr-Client: artist ${mbid} never appeared in Lidarr after ${MAX_ATTEMPTS} attempts — giving up`);
   }
 
   /**

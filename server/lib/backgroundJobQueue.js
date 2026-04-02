@@ -14,9 +14,8 @@ const { registry } = require('./providerRegistry');
  */
 
 const MB_JOB_TYPES = [
-  'artist_full', 'artist_releases', 'release_tracks',
-  'fetch_artist', 'fetch_artist_albums', 'fetch_release',
-  'fetch_album_full', 'download_image'
+  'fetch_artist_albums',
+  'fetch_album_full'
 ];
 
 const WIKI_JOB_TYPES = ['fetch_artist_wiki', 'fetch_album_wiki'];
@@ -45,18 +44,6 @@ class BackgroundJobQueue {
     this._processJobFn = null;
   }
 
-  // ─── MB worker pause/resume for inline priority fetches ─────────────────────
-
-  pauseMbWorker() {
-    this.mbPaused = true;
-    logger.info('MB worker paused for inline priority fetch');
-  }
-
-  resumeMbWorker() {
-    this.mbPaused = false;
-    logger.info('MB worker resumed');
-  }
-
   // ─── Provider availability helpers ──────────────────────────────────────────
 
   hasArtistImageProvider() {
@@ -75,33 +62,18 @@ class BackgroundJobQueue {
 
   // ─── Job queuing ────────────────────────────────────────────────────────────
 
-  /**
-   * Create a job record for tracking inline (synchronous) work.
-   * Job is created with 'processing' status — not queued for background workers.
-   * Call completeJob() when done.
-   */
-  async trackJob(jobType, entityType, entityMbid) {
+  async queueJob(jobType, entityType, entityMbid, priority = 0, metadata = null, parentJobId = null, rootArtistMbid = null) {
     try {
-      const result = await database.query(`
-        INSERT INTO metadata_jobs (job_type, entity_type, entity_mbid, status, started_at)
-        VALUES ($1, $2, $3, 'processing', NOW())
-        ON CONFLICT (job_type, entity_mbid) DO UPDATE
-          SET status = 'processing', started_at = NOW()
-        RETURNING id
-      `, [jobType, entityType, entityMbid]);
-      return result.rows[0].id;
-    } catch (error) {
-      logger.error('Failed to track job:', error);
-      return null;
-    }
-  }
+      // ON CONFLICT target differs based on whether this is a tree job or standalone job
+      // due to two partial unique indexes (see schema).
+      const conflictClause = rootArtistMbid
+        ? `ON CONFLICT (job_type, entity_mbid, root_artist_mbid) WHERE root_artist_mbid IS NOT NULL`
+        : `ON CONFLICT (job_type, entity_mbid) WHERE root_artist_mbid IS NULL`;
 
-  async queueJob(jobType, entityType, entityMbid, priority = 0, metadata = null) {
-    try {
       const result = await database.query(`
-        INSERT INTO metadata_jobs (job_type, entity_type, entity_mbid, priority, metadata)
-        VALUES ($1, $2, $3, $4, $5)
-        ON CONFLICT (job_type, entity_mbid) DO UPDATE
+        INSERT INTO metadata_jobs (job_type, entity_type, entity_mbid, priority, metadata, parent_job_id, root_artist_mbid)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ${conflictClause} DO UPDATE
           SET priority = GREATEST(metadata_jobs.priority, EXCLUDED.priority),
               status = CASE
                 WHEN metadata_jobs.status = 'processing' THEN metadata_jobs.status
@@ -114,7 +86,7 @@ class BackgroundJobQueue {
                 ELSE 0
               END
         RETURNING id, status
-      `, [jobType, entityType, entityMbid, priority, metadata ? JSON.stringify(metadata) : null]);
+      `, [jobType, entityType, entityMbid, priority, metadata ? JSON.stringify(metadata) : null, parentJobId, rootArtistMbid]);
 
       const { id: jobId, status } = result.rows[0];
       if (status !== 'completed') {
@@ -127,20 +99,28 @@ class BackgroundJobQueue {
     }
   }
 
-  async forceQueueJob(jobType, entityType, entityMbid, priority = 0, metadata = null) {
+  async forceQueueJob(jobType, entityType, entityMbid, priority = 0, metadata = null, parentJobId = null, rootArtistMbid = null) {
     try {
+      const conflictClause = rootArtistMbid
+        ? `ON CONFLICT (job_type, entity_mbid, root_artist_mbid) WHERE root_artist_mbid IS NOT NULL`
+        : `ON CONFLICT (job_type, entity_mbid) WHERE root_artist_mbid IS NULL`;
+
       const result = await database.query(`
-        INSERT INTO metadata_jobs (job_type, entity_type, entity_mbid, priority, metadata)
-        VALUES ($1, $2, $3, $4, $5)
-        ON CONFLICT (job_type, entity_mbid) DO UPDATE
+        INSERT INTO metadata_jobs (job_type, entity_type, entity_mbid, priority, metadata, parent_job_id, root_artist_mbid)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ${conflictClause} DO UPDATE
           SET priority = GREATEST(metadata_jobs.priority, EXCLUDED.priority),
               status = CASE
                 WHEN metadata_jobs.status = 'processing' THEN metadata_jobs.status
                 ELSE 'pending'
               END,
-              attempts = 0
+              attempts = 0,
+              metadata = CASE
+                WHEN EXCLUDED.metadata IS NOT NULL THEN EXCLUDED.metadata
+                ELSE (COALESCE(metadata_jobs.metadata, '{}'::jsonb) - 'lidarr_refresh_triggered')
+              END
         RETURNING id
-      `, [jobType, entityType, entityMbid, priority, metadata ? JSON.stringify(metadata) : null]);
+      `, [jobType, entityType, entityMbid, priority, metadata ? JSON.stringify(metadata) : null, parentJobId, rootArtistMbid]);
 
       const jobId = result.rows[0].id;
       logger.info(`Force-queued job ${jobId}: ${jobType} for ${entityType} ${entityMbid}`);
@@ -180,11 +160,68 @@ class BackgroundJobQueue {
   // ─── Job completion ──────────────────────────────────────────────────────────
 
   async completeJob(jobId) {
-    await database.query(
-      `UPDATE metadata_jobs SET status = 'completed', completed_at = NOW() WHERE id = $1`,
+    const result = await database.query(
+      `UPDATE metadata_jobs SET status = 'completed', completed_at = NOW() WHERE id = $1 RETURNING root_artist_mbid`,
       [jobId]
     );
     logger.info(`Job ${jobId} completed`);
+
+    const rootArtistMbid = result.rows[0]?.root_artist_mbid;
+    if (rootArtistMbid) {
+      await this._checkAndTriggerRefresh(rootArtistMbid);
+    }
+  }
+
+  // ─── Tree completion check ────────────────────────────────────────────────────
+
+  async _checkAndTriggerRefresh(rootArtistMbid) {
+    // Check if any jobs in this tree are still pending or processing
+    const pending = await database.query(`
+      SELECT 1 FROM metadata_jobs
+      WHERE root_artist_mbid = $1
+        AND status IN ('pending', 'processing')
+      LIMIT 1
+    `, [rootArtistMbid]);
+
+    if (pending.rows.length > 0) return; // tree still running
+
+    // Also wait for image downloads to complete for this artist's albums
+    const pendingDownloads = await database.query(`
+      SELECT 1 FROM images i
+      WHERE (
+        i.entity_mbid = $1
+        OR i.entity_mbid IN (
+          SELECT release_group_mbid FROM artist_release_groups WHERE artist_mbid = $1
+        )
+      )
+      AND i.cached = false
+      AND i.cache_failed = false
+      LIMIT 1
+    `, [rootArtistMbid]);
+
+    if (pendingDownloads.rows.length > 0) return; // image downloads still pending
+
+    // All jobs terminal — claim the refresh atomically so only one worker fires it
+    // even if multiple jobs complete simultaneously.
+    const claimed = await database.query(`
+      UPDATE metadata_jobs
+      SET metadata = COALESCE(metadata, '{}'::jsonb) || '{"lidarr_refresh_triggered": true}'::jsonb
+      WHERE root_artist_mbid = $1
+        AND job_type = 'fetch_artist_albums'
+        AND status = 'completed'
+        AND (metadata IS NULL OR (metadata->>'lidarr_refresh_triggered') IS NULL)
+      RETURNING id
+    `, [rootArtistMbid]);
+
+    if (claimed.rows.length === 0) return; // already triggered or no root job found
+
+    logger.info(`Job tree complete for artist ${rootArtistMbid} — triggering Lidarr refresh`);
+    const lidarrClient = require('./lidarrClient');
+    if (lidarrClient.enabled) {
+      lidarrClient.waitForArtistAndRefresh(rootArtistMbid).catch(err =>
+        logger.warn(`Lidarr refresh failed for artist ${rootArtistMbid}: ${err.message}`)
+      );
+    }
   }
 
   async failJob(jobId, errorMessage) {
@@ -260,9 +297,9 @@ class BackgroundJobQueue {
     logger.info(`Wiki job ${job.id}: ${job.job_type} for ${job.entity_mbid} [wiki worker ${this.wikiWorkers}/${this.maxWikiWorkers}]`);
     try {
       if (job.job_type === 'fetch_artist_wiki') {
-        await this._fetchArtistWiki(job.entity_mbid);
+        await this._fetchArtistWiki(job.entity_mbid, job.metadata?.forceRefresh);
       } else if (job.job_type === 'fetch_album_wiki') {
-        await this._fetchAlbumWiki(job.entity_mbid);
+        await this._fetchAlbumWiki(job.entity_mbid, job.metadata?.forceRefresh);
       }
       await this.completeJob(job.id);
     } catch (error) {
@@ -271,11 +308,11 @@ class BackgroundJobQueue {
     }
   }
 
-  async _fetchArtistWiki(mbid) {
+  async _fetchArtistWiki(mbid, force = false) {
     const existing = await database.query(
       'SELECT overview, name, type FROM artists WHERE mbid = $1', [mbid]
     );
-    if (!existing.rows[0] || existing.rows[0].overview) return;
+    if (!existing.rows[0] || (!force && existing.rows[0].overview)) return;
 
     const artist = existing.rows[0];
     const wikiProvider = registry.getProvider('wikipedia');
@@ -311,11 +348,11 @@ class BackgroundJobQueue {
     }
   }
 
-  async _fetchAlbumWiki(mbid) {
+  async _fetchAlbumWiki(mbid, force = false) {
     const existing = await database.query(
       'SELECT overview, title FROM release_groups WHERE mbid = $1', [mbid]
     );
-    if (!existing.rows[0] || existing.rows[0].overview) return;
+    if (!existing.rows[0] || (!force && existing.rows[0].overview)) return;
 
     const rg = existing.rows[0];
     const wikiProvider = registry.getProvider('wikipedia');
@@ -368,9 +405,9 @@ class BackgroundJobQueue {
     logger.info(`Image job ${job.id}: ${job.job_type} for ${job.entity_mbid} [image worker ${this.imageWorkers}/${this.maxImageWorkers}]`);
     try {
       if (job.job_type === 'fetch_artist_images') {
-        await this._fetchArtistImages(job.entity_mbid);
+        await this._fetchArtistImages(job.entity_mbid, job.metadata?.force);
       } else if (job.job_type === 'fetch_album_images') {
-        await this._fetchAlbumImages(job.entity_mbid);
+        await this._fetchAlbumImages(job.entity_mbid, job.metadata?.force);
       }
       await this.completeJob(job.id);
     } catch (error) {
@@ -379,7 +416,7 @@ class BackgroundJobQueue {
     }
   }
 
-  async _storeImageUrls(entityType, entityMbid, images, provider) {
+  async _storeImageUrls(entityType, entityMbid, images, provider, force = false) {
     // Get all user-uploaded cover types for this entity so we don't overwrite them
     const userUploaded = await database.query(`
       SELECT cover_type FROM images
@@ -399,15 +436,15 @@ class BackgroundJobQueue {
         ON CONFLICT (entity_mbid, cover_type, provider) DO UPDATE
           SET url = EXCLUDED.url,
               last_verified_at = NOW(),
-              cached = CASE WHEN images.url = EXCLUDED.url THEN images.cached ELSE false END,
-              cache_failed = CASE WHEN images.url = EXCLUDED.url THEN images.cache_failed ELSE false END
-      `, [entityType, entityMbid, image.Url, image.CoverType, image.Provider || provider]);
+              cached = CASE WHEN $6 THEN false WHEN images.url = EXCLUDED.url THEN images.cached ELSE false END,
+              cache_failed = CASE WHEN $6 THEN false WHEN images.url = EXCLUDED.url THEN images.cache_failed ELSE false END
+      `, [entityType, entityMbid, image.Url, image.CoverType, image.Provider || provider, force]);
       stored++;
     }
     logger.info(`Image: Stored ${stored}/${images.length} URLs for ${entityType} ${entityMbid} from ${provider}`);
   }
 
-  async _fetchArtistImages(mbid) {
+  async _fetchArtistImages(mbid, force = false) {
     const BLOCKED = new Set(['89ad4ac3-39f7-470e-963a-56509c546377', 'fe5b7087-438f-4e6e-bf3d-4a5b65e8d8b6']);
     if (BLOCKED.has(mbid)) return;
 
@@ -423,11 +460,6 @@ class BackgroundJobQueue {
     const existingTypes = new Set(existing.rows.map(r => r.cover_type));
 
     const ARTIST_IMAGE_TYPES = ['Poster', 'Banner', 'Fanart', 'Logo'];
-    const missingTypes = ARTIST_IMAGE_TYPES.filter(t => !existingTypes.has(t));
-    if (missingTypes.length === 0) {
-      logger.info(`Image: All artist image types already cached for ${mbid}, skipping`);
-      return;
-    }
 
     // Provider fallback order: Fanart > Deezer
     // For each missing type, try providers in order, stop at first hit
@@ -450,19 +482,19 @@ class BackgroundJobQueue {
       return cache.get(provider.name);
     };
 
-    for (const type of missingTypes) {
+    for (const type of ARTIST_IMAGE_TYPES) {
       for (const provider of providers) {
         const images = await getImages(provider);
         const match = images.find(img => img.CoverType === type);
         if (match) {
-          await this._storeImageUrls('artist', mbid, [match], match.Provider || provider.name);
+          await this._storeImageUrls('artist', mbid, [match], match.Provider || provider.name, force);
           break;
         }
       }
     }
   }
 
-  async _fetchAlbumImages(mbid) {
+  async _fetchAlbumImages(mbid, force = false) {
     const result = await database.query(
       `SELECT rg.title, a.name as artist_name
        FROM release_groups rg
@@ -481,14 +513,8 @@ class BackgroundJobQueue {
     const existingTypes = new Set(existing.rows.map(r => r.cover_type));
 
     const ALBUM_IMAGE_TYPES = ['Cover', 'Disc'];
-    const missingTypes = ALBUM_IMAGE_TYPES.filter(t => !existingTypes.has(t));
-    if (missingTypes.length === 0) {
-      logger.info(`Image: All album image types already cached for ${mbid}, skipping`);
-      return;
-    }
-
     // Provider fallback order: Fanart > CAA > Deezer
-    // For each missing type, try providers in order, stop at first hit
+    // For each type, try providers in order, stop at first hit
     const providers = [
       registry.getProvider('fanart'),
       registry.getProvider('coverartarchive'),
@@ -510,12 +536,12 @@ class BackgroundJobQueue {
       return cache.get(provider.name);
     };
 
-    for (const type of missingTypes) {
+    for (const type of ALBUM_IMAGE_TYPES) {
       for (const provider of providers) {
         const images = await getImages(provider);
         const match = images.find(img => img.CoverType === type);
         if (match) {
-          await this._storeImageUrls('release_group', mbid, [match], match.Provider || provider.name);
+          await this._storeImageUrls('release_group', mbid, [match], match.Provider || provider.name, force);
           break;
         }
       }

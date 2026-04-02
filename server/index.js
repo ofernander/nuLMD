@@ -9,7 +9,6 @@ const config = require('./lib/config');
 const database = require('./sql/database');
 const routes = require('./lib/routes');
 const { logConnection, init: initRequestLog } = require('./lib/request');
-const lidarr = require('./lib/lidarr');
 const metaHandler = require('./lib/metaHandler');
 const { registry } = require('./lib/providerRegistry');
 const { initializeProviders } = require('./lib/providerRegistry');
@@ -61,24 +60,9 @@ app.get('/artist/:mbid', async (req, res) => {
         status: 'ok'
     });
 
-    const artistCheck = await database.getArtist(mbid);
-    if (artistCheck && !artistCheck.overview) {
-      const wikiDone = await database.query(
-        `SELECT 1 FROM metadata_jobs WHERE job_type = 'fetch_artist_wiki' AND entity_mbid = $1 AND status = 'completed' LIMIT 1`,
-        [mbid]
-      );
-      if (wikiDone.rows.length === 0) {
-        backgroundJobQueue.queueJob('fetch_artist_wiki', 'artist', mbid, 1);
-      } else {
-        logger.info(`Wiki already fetched for artist ${mbid}, skipping`);
-      }
-    }
-    if (backgroundJobQueue.hasArtistImageProvider()) {
-      backgroundJobQueue.queueJob('fetch_artist_images', 'artist', mbid, 1);
-    }
-
-    // Queue background job to fetch releases for all albums
-    backgroundJobQueue.queueJob('fetch_artist_albums', 'artist', mbid, 1)
+    // Always queue fetch_artist_albums — queueJob is idempotent, completed jobs are left alone.
+    // TTL is a DB concern handled inside ensureArtist; it has no bearing on whether to notify Lidarr.
+    backgroundJobQueue.queueJob('fetch_artist_albums', 'artist', mbid, 1, null, null, mbid)
       .catch(err => logger.error(`Failed to queue fetch_artist_albums for ${mbid}:`, err));
 
     res.json(formatted);
@@ -92,29 +76,17 @@ app.get('/album/:mbid', async (req, res) => {
   try {
     const { mbid } = req.params;
     logger.info(`Lidarr album request: ${mbid}`);
-    const formatted = await metaHandler.ensureAlbum(mbid);
+    const { formatted, needsFullFetch } = await metaHandler.ensureAlbum(mbid);
+    if (needsFullFetch) {
+      backgroundJobQueue.queueJob('fetch_album_full', 'release_group', mbid, 1)
+        .catch(err => logger.error(`Failed to queue fetch_album_full for ${mbid}:`, err));
+    }
     logConnection({
         direction: 'inbound',
         label: 'Album Lookup',
         detail: formatted.title || mbid.substring(0, 8) + '...',
         status: 'ok'
     });
-
-    const albumCheck = await database.getReleaseGroup(mbid);
-    if (albumCheck && !albumCheck.overview) {
-      const wikiDone = await database.query(
-        `SELECT 1 FROM metadata_jobs WHERE job_type = 'fetch_album_wiki' AND entity_mbid = $1 AND status = 'completed' LIMIT 1`,
-        [mbid]
-      );
-      if (wikiDone.rows.length === 0) {
-        backgroundJobQueue.queueJob('fetch_album_wiki', 'release_group', mbid, 1);
-      } else {
-        logger.info(`Wiki already fetched for album ${mbid}, skipping`);
-      }
-    }
-    if (backgroundJobQueue.hasAlbumImageProvider()) {
-      backgroundJobQueue.queueJob('fetch_album_images', 'release_group', mbid, 1);
-    }
 
     res.json(formatted);
   } catch (error) {
