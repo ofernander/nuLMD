@@ -9,11 +9,42 @@ jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       packages: write
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate release notes
+        id: release_notes
+        run: |
+          CURRENT_TAG=${GITHUB_REF_NAME}
+          PREVIOUS_TAG=$(git tag --sort=-version:refname | grep -v "^${CURRENT_TAG}$" | head -1)
+
+          if [ -z "$PREVIOUS_TAG" ]; then
+            COMMITS=$(git log --pretty=format:"%s" | grep -E "^(feat|fix|chore):")
+          else
+            COMMITS=$(git log ${PREVIOUS_TAG}..${CURRENT_TAG} --pretty=format:"%s" | grep -E "^(feat|fix|chore):")
+          fi
+
+          printf "## nuLMD %s Change log\n\n" "${CURRENT_TAG}" > /tmp/notes.md
+
+          while IFS= read -r line; do
+            TYPE=$(echo "$line" | cut -d: -f1)
+            DESC=$(echo "$line" | cut -d: -f2- | sed 's/^ //')
+            printf -- "- \`%s:\` %s\n" "$TYPE" "$DESC" >> /tmp/notes.md
+          done <<< "$COMMITS"
+
+          if [ -n "$PREVIOUS_TAG" ]; then
+            printf "\n**Full Changelog:** https://github.com/%s/compare/%s...%s\n" \
+              "${{ github.repository }}" "$PREVIOUS_TAG" "$CURRENT_TAG" >> /tmp/notes.md
+          fi
+
+          echo "notes<<EOF" >> $GITHUB_OUTPUT
+          cat /tmp/notes.md >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
       - uses: docker/login-action@v3
         with:
@@ -28,3 +59,8 @@ jobs:
           tags: |
             ghcr.io/ofernander/nulmd:latest
             ghcr.io/ofernander/nulmd:${{ github.ref_name }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body: ${{ steps.release_notes.outputs.notes }}
