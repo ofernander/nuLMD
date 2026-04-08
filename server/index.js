@@ -186,6 +186,9 @@ async function start() {
       }
     }
 
+    // Periodic health check — reconnects if Lidarr restarts after nuLMD starts
+    lidarrClient.startHealthCheck();
+
     // Start listening
     app.listen(PORT, () => {
       const serverUrl = process.env.SERVER_URL || `http://localhost:${PORT}`;
