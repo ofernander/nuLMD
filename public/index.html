@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>nuLMD</title>
-    <link rel="stylesheet" href="/css/core.css?v=39">
+    <link rel="stylesheet" href="/css/core.css?v=41">
 </head>
 <body>
     <div class="container">
@@ -176,6 +176,18 @@
                             <h2>Log Files</h2>
                             <div id="logFileList"><p style="color: var(--text-secondary); font-size: 0.875rem;">Loading...</p></div>
                         </div>
+                        <div class="card" style="margin-top: 1rem;">
+                            <h2>Log Level</h2>
+                            <div class="form-group">
+                                <select class="form-control" id="settings.logLevel">
+                                    <option value="info">Info</option>
+                                    <option value="warn">Warnings &amp; Errors</option>
+                                    <option value="debug">Debug</option>
+                                </select>
+                            </div>
+                            <button class="btn btn-primary" style="width:100%;" onclick="ui.saveLogLevel()">Apply</button>
+                            <small class="form-text" style="display:block; margin-top:0.5rem; color:var(--text-secondary);">Takes effect immediately.</small>
+                        </div>
                     </div>
 
                     <div class="card">
@@ -228,7 +240,7 @@
         </footer>
     </div>
 
-    <script src="/js/main.js?v=39"></script>
-    <script src="/js/ui.js?v=39"></script>
+    <script src="/js/main.js?v=41"></script>
+    <script src="/js/ui.js?v=41"></script>
 </body>
 </html>

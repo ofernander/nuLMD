@@ -147,11 +147,8 @@ class Database {
   }
 
   async query(text, params) {
-    const start = Date.now();
     try {
       const result = await this.pool.query(text, params);
-      const duration = Date.now() - start;
-      logger.debug('Executed query', { duration, rows: result.rowCount });
       return result;
     } catch (error) {
       logger.error('Query error:', error);

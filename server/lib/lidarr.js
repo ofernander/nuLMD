@@ -335,7 +335,10 @@ class LidarrFormatter {
        LIMIT 1`,
       [artistMbid]
     );
-    if (jobDone.rows.length === 0) return [];
+    if (jobDone.rows.length === 0) {
+      logger.info(`getAlbumsForArtist ${artistMbid}: fetch_artist_albums not yet complete — returning empty list`);
+      return [];
+    }
 
     const result = await database.query(`
       SELECT
@@ -359,11 +362,15 @@ class LidarrFormatter {
       ORDER BY rg.first_release_date DESC NULLS LAST, rg.title
     `, [artistMbid]);
 
-    // Filter to only albums where this artist is artist_credit[0] (matching oldLMD: position = 0)
-    return (result.rows || []).filter(album => {
+    const filtered = (result.rows || []).filter(album => {
       const ac = this.parseJson(album.artist_credit);
       return ac && ac.length > 0 && ac[0].artist && ac[0].artist.id === artistMbid;
-    }).map(album => {
+    });
+
+    logger.info(`getAlbumsForArtist ${artistMbid}: ${result.rows.length} release groups found, ${filtered.length} pass artist_credit[0] filter`);
+    logger.debug(`getAlbumsForArtist ${artistMbid}: filtered out ${result.rows.length - filtered.length} collaborative/non-primary albums`);
+
+    return filtered.map(album => {
       const secondaryTypes = this.parseJson(album.secondary_types);
       const releaseStatuses = this.parseJson(album.release_statuses);
 

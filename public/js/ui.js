@@ -893,6 +893,8 @@ const ui = {
             document.getElementById('settings.lidarr.enabled').checked = !!li.enabled;
             document.getElementById('settings.lidarr.url').value = li.url || '';
             document.getElementById('settings.lidarr.apiKey').value = li.apiKey || '';
+            const levelEl = document.getElementById('settings.logLevel');
+            if (levelEl) levelEl.value = config.server?.logLevel || 'info';
         } catch (e) {
             console.error('Failed to load settings:', e);
         }
@@ -913,6 +915,25 @@ const ui = {
     },
 
     // ─── Lidarr Integration ─────────────────────────────────────────────────
+
+    async saveLogLevel() {
+        const level = document.getElementById('settings.logLevel').value;
+        try {
+            const response = await fetch('/api/log-level', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ level })
+            });
+            const result = await response.json();
+            if (result.success) {
+                this.showSuccess(`Log level set to: ${level}`);
+            } else {
+                this.showError(result.error || 'Failed to set log level');
+            }
+        } catch (e) {
+            this.showError('Failed to set log level');
+        }
+    },
 
     async testLidarrConnection() {
         const resultEl = document.getElementById('lidarrTestResult');

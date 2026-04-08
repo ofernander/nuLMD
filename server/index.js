@@ -4,7 +4,7 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const path = require('path');
-const { logger } = require('./lib/logger');
+const { logger, setLogLevel } = require('./lib/logger');
 const config = require('./lib/config');
 const database = require('./sql/database');
 const routes = require('./lib/routes');
@@ -153,6 +153,13 @@ async function start() {
     // Load configuration
     await config.load();
     logger.info('Configuration loaded');
+
+    // Apply persisted log level — overrides env var if user has saved a preference via UI
+    const persistedLevel = config.get('server.logLevel');
+    if (persistedLevel) {
+      setLogLevel(persistedLevel);
+      logger.info(`Log level applied from config: ${persistedLevel}`);
+    }
 
     // Initialize database
     await database.initialize();

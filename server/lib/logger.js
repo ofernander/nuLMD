@@ -2,7 +2,14 @@ const winston = require('winston');
 const DailyRotateFile = require('winston-daily-rotate-file');
 const path = require('path');
 
-const logLevel = process.env.LOG_LEVEL || 'info';
+const logLevel = process.env.LOG_LEVEL || 'info'; // may be overridden after config loads — see index.js
+
+// Map UI label names to Winston levels
+const LOG_LEVEL_MAP = { info: 'info', warn: 'warn', debug: 'debug' };
+
+function resolveLevel(level) {
+  return LOG_LEVEL_MAP[level] || level;
+}
 
 // In-memory circular buffer for recent logs (last 5000)
 const logBuffer = [];
@@ -87,8 +94,11 @@ function getRecentLogs(count = 100) {
 
 // Function to dynamically change log level
 function setLogLevel(level) {
-  logger.level = level;
-  logger.info(`Log level changed to: ${level}`);
+  const resolved = resolveLevel(level);
+  logger.level = resolved;
+  // Must update each transport individually — Winston doesn't cascade from logger.level alone
+  logger.transports.forEach(t => { t.level = resolved; });
+  logger.info(`Log level changed to: ${resolved}`);
 }
 
-module.exports = { logger, getRecentLogs, setLogLevel };
+module.exports = { logger, getRecentLogs, setLogLevel, resolveLevel };

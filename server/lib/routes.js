@@ -4,7 +4,7 @@ const { getRequestLog } = require('./request');
 const { registry } = require('./providerRegistry');
 const config = require('./config');
 const cache = require('./cache');
-const { logger, getRecentLogs } = require('./logger');
+const { logger, getRecentLogs, resolveLevel } = require('./logger');
 const metaHandler = require('./metaHandler');
 const lidarr = require('./lidarr');
 const backgroundJobQueue = require('./backgroundJobQueue');
@@ -383,13 +383,20 @@ router.get('/log-level', (req, res) => {
 router.post('/log-level', (req, res) => {
   const { level } = req.body;
   const { setLogLevel } = require('./logger');
-  
-  if (!['error', 'warn', 'info', 'debug'].includes(level)) {
+
+  const resolved = resolveLevel(level);
+  const validLevels = ['error', 'warn', 'info', 'http', 'verbose', 'debug', 'silly'];
+  if (!validLevels.includes(resolved)) {
     return res.status(400).json({ error: 'Invalid log level' });
   }
-  
-  setLogLevel(level);
-  res.json({ success: true, level });
+
+  setLogLevel(resolved);
+
+  // Persist so level survives restart
+  config.set('server.logLevel', resolved);
+  config.save().catch(err => logger.error('Failed to persist log level:', err));
+
+  res.json({ success: true, level: resolved });
 });
 
 // Server restart endpoint
