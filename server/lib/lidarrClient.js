@@ -81,10 +81,10 @@ class LidarrClient {
 
   /**
    * Fetch all artists from Lidarr and build MBID → ID map.
-   * @returns {Promise<number>} Number of artists mapped
+   * @returns {Promise<{count: number, reachable: boolean}>}
    */
   async refreshArtistMap() {
-    if (!this.client) return 0;
+    if (!this.client) return { count: 0, reachable: false };
 
     try {
       const response = await this.client.get('/artist');
@@ -102,11 +102,11 @@ class LidarrClient {
 
       this.lastMapRefresh = Date.now();
       logger.info(`Lidarr-Client: artist map refreshed: ${this.artistMap.size} artists`);
-      return this.artistMap.size;
+      return { count: this.artistMap.size, reachable: true };
     } catch (error) {
       const msg = this._formatError(error);
       logger.error(`Lidarr-Client: failed to refresh artist map: ${msg}`);
-      return 0;
+      return { count: 0, reachable: false };
     }
   }
 
@@ -121,7 +121,8 @@ class LidarrClient {
 
     // Refresh map if stale or empty
     if (this.artistMap.size === 0 || this._isMapStale()) {
-      await this.refreshArtistMap();
+      const { reachable } = await this.refreshArtistMap();
+      if (!reachable) return null;
     }
 
     const entry = this.artistMap.get(mbid);
@@ -167,7 +168,10 @@ class LidarrClient {
     let lidarrId = await this.getLidarrId(mbid);
     if (!lidarrId) {
       // Force a fresh map refresh and retry once — artist may have just been added
-      await this.refreshArtistMap();
+      const { reachable } = await this.refreshArtistMap();
+      if (!reachable) {
+        return { success: false, skipped: true, error: 'Lidarr unreachable' };
+      }
       lidarrId = this.artistMap.get(mbid)?.id;
       if (!lidarrId) {
         logger.warn(`Lidarr-Client: artist ${mbid} not found in Lidarr after map refresh — skipping refresh`);
@@ -180,7 +184,8 @@ class LidarrClient {
 
   /**
    * Poll Lidarr until the artist appears, then trigger refresh.
-   * Polls every 15s for up to 10 minutes before giving up.
+   * Polls every 15s. Distinguishes Lidarr being unreachable from artist genuinely
+   * absent — only counts attempts where Lidarr was reachable against the give-up budget.
    * Fire-and-forget — does not block the caller.
    */
   async waitForArtistAndRefresh(mbid) {
@@ -189,25 +194,62 @@ class LidarrClient {
       return;
     }
 
-    const MAX_ATTEMPTS = 40; // 40 x 15s = 10 minutes
+    const MAX_NOT_FOUND_ATTEMPTS = 40; // 40 x 15s = 10 minutes of Lidarr being up but artist absent
     const INTERVAL_MS = 15000;
+    let notFoundAttempts = 0;
 
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    while (true) {
       try {
-        await this.refreshArtistMap();
+        const { reachable } = await this.refreshArtistMap();
+        if (!reachable) {
+          logger.warn(`Lidarr-Client: Lidarr unreachable while waiting for artist ${mbid} — will retry in ${INTERVAL_MS / 1000}s`);
+          await new Promise(r => setTimeout(r, INTERVAL_MS));
+          continue;
+        }
         const lidarrId = this.artistMap.get(mbid)?.id;
         if (lidarrId) {
-          logger.info(`Lidarr-Client: artist ${mbid} found in Lidarr (attempt ${attempt}) — triggering refresh`);
+          logger.info(`Lidarr-Client: artist ${mbid} found in Lidarr — triggering refresh`);
           return this.refreshArtist(lidarrId);
         }
       } catch (err) {
         logger.warn(`Lidarr-Client: poll failed for ${mbid}: ${err.message}`);
+        await new Promise(r => setTimeout(r, INTERVAL_MS));
+        continue;
       }
-      logger.info(`Lidarr-Client: artist ${mbid} not in Lidarr yet (attempt ${attempt}/${MAX_ATTEMPTS}), retrying in ${INTERVAL_MS / 1000}s`);
+      notFoundAttempts++;
+      if (notFoundAttempts >= MAX_NOT_FOUND_ATTEMPTS) {
+        logger.warn(`Lidarr-Client: artist ${mbid} not found in Lidarr after ${MAX_NOT_FOUND_ATTEMPTS} reachable attempts — giving up`);
+        return;
+      }
+      logger.info(`Lidarr-Client: artist ${mbid} not in Lidarr yet (attempt ${notFoundAttempts}/${MAX_NOT_FOUND_ATTEMPTS}), retrying in ${INTERVAL_MS / 1000}s`);
       await new Promise(r => setTimeout(r, INTERVAL_MS));
     }
+  }
 
-    logger.warn(`Lidarr-Client: artist ${mbid} never appeared in Lidarr after ${MAX_ATTEMPTS} attempts — giving up`);
+  /**
+   * Periodic health check — every 10 minutes.
+   * Re-initializes if client was lost and Lidarr is back up.
+   * Also keeps the artist map fresh.
+   */
+  startHealthCheck(intervalMs = 10 * 60 * 1000) {
+    setInterval(async () => {
+      if (!this.url || !this.apiKey) return; // not configured, nothing to check
+      // If client was never created or dropped, attempt re-init first
+      if (!this.client) {
+        this.initialize();
+        if (!this.client) return; // still no config
+      }
+      const result = await this.testConnection();
+      if (result.success) {
+        if (!this.enabled) {
+          logger.info('Lidarr-Client: health check recovered connection — re-enabling');
+          this.enabled = true;
+        }
+        await this.refreshArtistMap();
+      } else {
+        logger.warn(`Lidarr-Client: health check failed: ${result.error}`);
+      }
+    }, intervalMs);
   }
 
   /**

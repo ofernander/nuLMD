@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>nuLMD</title>
-    <link rel="stylesheet" href="/css/core.css?v=39">
+    <link rel="stylesheet" href="/css/core.css?v=42">
 </head>
 <body>
     <div class="container">
@@ -176,10 +176,31 @@
                             <h2>Log Files</h2>
                             <div id="logFileList"><p style="color: var(--text-secondary); font-size: 0.875rem;">Loading...</p></div>
                         </div>
+                        <div class="card" style="margin-top: 1rem;">
+                            <h2>Log Level</h2>
+                            <div class="form-group">
+                                <select class="form-control" id="settings.logLevel">
+                                    <option value="info">Info</option>
+                                    <option value="warn">Warnings &amp; Errors</option>
+                                    <option value="debug">Debug</option>
+                                </select>
+                            </div>
+                            <button class="btn btn-primary" style="width:100%;" onclick="ui.saveLogLevel()">Apply</button>
+                            <small class="form-text" style="display:block; margin-top:0.5rem; color:var(--text-secondary);">Takes effect immediately.</small>
+                        </div>
                     </div>
 
                     <div class="card">
-                        <h2 id="logViewerTitle" style="margin-bottom: 1rem;">Select a log file</h2>
+                        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:1rem; flex-wrap:wrap; gap:0.75rem;">
+                            <h2 id="logViewerTitle" style="margin:0;">Select a log file</h2>
+                            <div style="display:flex; align-items:center; gap:0.5rem;">
+                                <input type="number" id="logTailLines" value="500" min="100" max="5000" step="100"
+                                    class="form-control" style="width:90px;"
+                                    title="Number of lines to display">
+                                <button class="btn btn-secondary" onclick="ui.applyLogTailLines()">Apply</button>
+                                <button class="btn btn-secondary" id="logPauseBtn" onclick="ui.toggleLogPause()">Pause</button>
+                            </div>
+                        </div>
                         <div id="logViewer" class="log-viewer">
                             <div class="log-loading">Loading...</div>
                         </div>
@@ -228,7 +249,7 @@
         </footer>
     </div>
 
-    <script src="/js/main.js?v=39"></script>
-    <script src="/js/ui.js?v=39"></script>
+    <script src="/js/main.js?v=42"></script>
+    <script src="/js/ui.js?v=42"></script>
 </body>
 </html>

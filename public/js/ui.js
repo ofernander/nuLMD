@@ -16,6 +16,10 @@ const JOB_LABELS = {
 // UI management functions
 const ui = {
     refreshInterval: null,
+    logPollInterval: null,
+    logPaused: false,
+    logTailLines: 500,
+    currentLogLineCount: 0,
 
     async refreshDashboard() {
         try {
@@ -893,6 +897,8 @@ const ui = {
             document.getElementById('settings.lidarr.enabled').checked = !!li.enabled;
             document.getElementById('settings.lidarr.url').value = li.url || '';
             document.getElementById('settings.lidarr.apiKey').value = li.apiKey || '';
+            const levelEl = document.getElementById('settings.logLevel');
+            if (levelEl) levelEl.value = config.server?.logLevel || 'info';
         } catch (e) {
             console.error('Failed to load settings:', e);
         }
@@ -913,6 +919,25 @@ const ui = {
     },
 
     // ─── Lidarr Integration ─────────────────────────────────────────────────
+
+    async saveLogLevel() {
+        const level = document.getElementById('settings.logLevel').value;
+        try {
+            const response = await fetch('/api/log-level', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ level })
+            });
+            const result = await response.json();
+            if (result.success) {
+                this.showSuccess(`Log level set to: ${level}`);
+            } else {
+                this.showError(result.error || 'Failed to set log level');
+            }
+        } catch (e) {
+            this.showError('Failed to set log level');
+        }
+    },
 
     async testLidarrConnection() {
         const resultEl = document.getElementById('lidarrTestResult');
@@ -1232,8 +1257,11 @@ const ui = {
     // ─── Logs Tab ────────────────────────────────────────────────────────────────
 
     async loadLogsTab() {
+        this._stopLogPolling();
+        this.logPaused = false;
+        const pauseBtn = document.getElementById('logPauseBtn');
+        if (pauseBtn) pauseBtn.textContent = 'Pause';
         await this.loadLogFileList();
-        // Auto-select most recent file (first in list, sorted by modified desc)
         const firstEntry = document.querySelector('.log-file-entry');
         if (firstEntry) firstEntry.click();
     },
@@ -1268,7 +1296,8 @@ const ui = {
 
     async selectLogFile(filename) {
         this.currentLogFile = filename;
-        this.lastLogLength = 0;
+        this.currentLogLineCount = 0;
+        this._stopLogPolling();
 
         // Update active state in file list
         await this.loadLogFileList();
@@ -1286,19 +1315,71 @@ const ui = {
         viewer.innerHTML = '<div class="log-loading">Loading...</div>';
 
         try {
-            const response = await fetch(`/api/logs/file?name=${encodeURIComponent(filename)}&tail=500`);
+            const response = await fetch(`/api/logs/file?name=${encodeURIComponent(filename)}&tail=${this.logTailLines}`);
             if (!response.ok) throw new Error('Failed to load file');
             const logs = await response.json();
 
             if (logs.length === 0) {
                 viewer.innerHTML = '<div class="log-empty">No log entries</div>';
-                return;
+                this.currentLogLineCount = 0;
+            } else {
+                viewer.innerHTML = logs.map(log => this.formatLogLine(log)).join('');
+                viewer.scrollTop = viewer.scrollHeight;
+                this.currentLogLineCount = logs.length;
             }
-
-            viewer.innerHTML = logs.map(log => this.formatLogLine(log)).join('');
-            viewer.scrollTop = viewer.scrollHeight;
+            this._startLogPolling(filename);
         } catch (error) {
             viewer.innerHTML = `<div class="log-empty">Failed to load ${filename}</div>`;
+        }
+    },
+
+    _startLogPolling(filename) {
+        this._stopLogPolling();
+        this.logPollInterval = setInterval(async () => {
+            if (this.logPaused) return;
+            if (!document.getElementById('logs-tab').classList.contains('active')) return;
+            try {
+                const response = await fetch(`/api/logs/file?name=${encodeURIComponent(filename)}&tail=${this.logTailLines}`);
+                if (!response.ok) return;
+                const logs = await response.json();
+                if (logs.length <= this.currentLogLineCount) return;
+                const newLines = logs.slice(this.currentLogLineCount);
+                const viewer = document.getElementById('logViewer');
+                if (!viewer) return;
+                newLines.forEach(log => {
+                    viewer.insertAdjacentHTML('beforeend', this.formatLogLine(log));
+                });
+                viewer.scrollTop = viewer.scrollHeight;
+                this.currentLogLineCount = logs.length;
+            } catch (e) {
+                // silent — don't disrupt the viewer on a poll failure
+            }
+        }, 2000);
+    },
+
+    _stopLogPolling() {
+        if (this.logPollInterval) {
+            clearInterval(this.logPollInterval);
+            this.logPollInterval = null;
+        }
+    },
+
+    toggleLogPause() {
+        this.logPaused = !this.logPaused;
+        const btn = document.getElementById('logPauseBtn');
+        if (btn) btn.textContent = this.logPaused ? 'Resume' : 'Pause';
+    },
+
+    applyLogTailLines() {
+        const input = document.getElementById('logTailLines');
+        const val = parseInt(input.value);
+        if (isNaN(val) || val < 100 || val > 5000) {
+            this.showError('Lines must be between 100 and 5000');
+            return;
+        }
+        this.logTailLines = val;
+        if (this.currentLogFile) {
+            this.selectLogFile(this.currentLogFile);
         }
     },
 

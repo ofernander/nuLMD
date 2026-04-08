@@ -228,6 +228,7 @@ class ArtistService {
       const rg = existing.rows[0];
       if (rg.ttl_expires_at && new Date(rg.ttl_expires_at) > new Date() && rg.overview) {
         logger.info(`Release group ${mbid} within TTL, skipping update`);
+        logger.debug(`Release group ${mbid} TTL expires: ${rg.ttl_expires_at}, has overview: ${!!rg.overview}`);
         // Still ensure artist link exists
         if (artistMbid) {
           const link = await database.query(
@@ -537,7 +538,11 @@ class ArtistService {
     if (!artist) {
       logger.info(`Artist ${mbid} not in DB, fetching from MusicBrainz`);
       await this.getArtist(mbid);
-    } else if (this.isStale(artist)) {
+    } else {
+      logger.info(`Artist ${mbid} found in DB — ${this.isStale(artist) ? 'TTL expired, refreshing' : 'TTL valid, serving from cache'}`);
+      logger.debug(`Artist ${mbid} TTL expires: ${artist.ttl_expires_at}`);
+    }
+    if (artist && this.isStale(artist)) {
       logger.info(`Artist ${mbid} TTL expired, refreshing`);
       await this.refreshArtist(mbid);
     }
@@ -597,11 +602,12 @@ class ArtistService {
         [mbid]
       );
       if (hasReleases.rows.length > 0) {
-        logger.info(`Album ${mbid} within TTL, serving from DB`);
+        logger.info(`Album ${mbid} within TTL and has releases — serving from cache`);
+        logger.debug(`Album ${mbid} TTL expires: ${album.ttl_expires_at}`);
         const formatted = await lidarr.formatAlbum(mbid);
         return { formatted, needsFullFetch: false };
       }
-      logger.info(`Album ${mbid} within TTL but has no releases, fetching`);
+      logger.info(`Album ${mbid} within TTL but no releases in DB — will fetch`);
     }
 
     if (!album) {
@@ -622,6 +628,10 @@ class ArtistService {
       const officialReleases = releases.filter(r => r.status === 'Official');
       const toFetch = officialReleases.length > 0 ? officialReleases : releases;
       const inlineReleases = toFetch.slice(0, INLINE_RELEASE_CAP);
+
+      needsFullFetch = toFetch.length > INLINE_RELEASE_CAP;
+      logger.info(`Album ${mbid}: ${toFetch.length} releases from MB (${officialReleases.length} official), fetching ${inlineReleases.length} inline${needsFullFetch ? `, ${toFetch.length - INLINE_RELEASE_CAP} deferred to fetch_album_full` : ', all inline'}`);
+      logger.debug(`Album ${mbid}: cap=${INLINE_RELEASE_CAP}, needsFullFetch=${needsFullFetch}`);
 
       logger.info(`Album ${mbid}: fetching ${inlineReleases.length} of ${toFetch.length} releases inline`);
 
@@ -660,6 +670,8 @@ class ArtistService {
         const officialReleases = releases.filter(r => r.status === 'Official');
         const toFetch2 = officialReleases.length > 0 ? officialReleases : releases;
         const inlineReleases2 = toFetch2.slice(0, INLINE_RELEASE_CAP);
+        const needsFull2 = toFetch2.length > INLINE_RELEASE_CAP;
+        logger.info(`Album ${mbid} (exists, no releases): ${toFetch2.length} releases from MB (${officialReleases.length} official), fetching ${inlineReleases2.length} inline${needsFull2 ? `, ${toFetch2.length - INLINE_RELEASE_CAP} deferred to fetch_album_full` : ', all inline'}`);
         logger.info(`Album ${mbid} (exists, no releases): fetching ${inlineReleases2.length} of ${toFetch2.length} releases inline`);
         for (const release of inlineReleases2) {
           try {

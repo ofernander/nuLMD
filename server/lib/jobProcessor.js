@@ -112,7 +112,7 @@ async function fetchArtistAlbums(job) {
     try {
       const { needsFullFetch } = await metaHandler.ensureAlbum(rgMbid, forceRefresh);
       fetched++;
-      logger.info(`Background: ensureAlbum complete for ${rgMbid} (${fetched} albums processed)`);
+      logger.info(`Background: ensureAlbum complete for ${rgMbid} (${fetched}/${releaseGroups.length}) — needsFullFetch=${needsFullFetch}`);
 
       // Queue fetch_album_full as tree child if album has remaining releases
       if (needsFullFetch) {
@@ -195,6 +195,7 @@ async function fetchAlbumFull(releaseGroupMbid) {
     return !alreadyFetched && matchesFilter;
   });
 
+  logger.info(`Album ${releaseGroupMbid}: ${allReleases.length} releases from MB, ${storedMbids.size} already in DB, ${remainingReleases.length} remaining to fetch`);
   logger.info(`Fetching ${remainingReleases.length} remaining releases for album ${releaseGroupMbid}`);
 
   const failedReleases = [];

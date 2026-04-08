@@ -177,17 +177,19 @@ class BackgroundJobQueue {
   async _checkAndTriggerRefresh(rootArtistMbid) {
     // Check if any jobs in this tree are still pending or processing
     const pending = await database.query(`
-      SELECT 1 FROM metadata_jobs
+      SELECT COUNT(*) as n FROM metadata_jobs
       WHERE root_artist_mbid = $1
         AND status IN ('pending', 'processing')
-      LIMIT 1
     `, [rootArtistMbid]);
 
-    if (pending.rows.length > 0) return; // tree still running
+    if (parseInt(pending.rows[0].n) > 0) {
+      logger.info(`Refresh check ${rootArtistMbid}: waiting — ${pending.rows[0].n} job(s) still pending/processing`);
+      return;
+    }
 
     // Also wait for image downloads to complete for this artist's albums
     const pendingDownloads = await database.query(`
-      SELECT 1 FROM images i
+      SELECT COUNT(*) as n FROM images i
       WHERE (
         i.entity_mbid = $1
         OR i.entity_mbid IN (
@@ -196,10 +198,12 @@ class BackgroundJobQueue {
       )
       AND i.cached = false
       AND i.cache_failed = false
-      LIMIT 1
     `, [rootArtistMbid]);
 
-    if (pendingDownloads.rows.length > 0) return; // image downloads still pending
+    if (parseInt(pendingDownloads.rows[0].n) > 0) {
+      logger.info(`Refresh check ${rootArtistMbid}: waiting — ${pendingDownloads.rows[0].n} image download(s) still pending`);
+      return;
+    }
 
     // All jobs terminal — claim the refresh atomically so only one worker fires it
     // even if multiple jobs complete simultaneously.
@@ -213,7 +217,10 @@ class BackgroundJobQueue {
       RETURNING id
     `, [rootArtistMbid]);
 
-    if (claimed.rows.length === 0) return; // already triggered or no root job found
+    if (claimed.rows.length === 0) {
+      logger.info(`Refresh check ${rootArtistMbid}: refresh already triggered or no root job found, skipping`);
+      return;
+    }
 
     logger.info(`Job tree complete for artist ${rootArtistMbid} — triggering Lidarr refresh`);
     const lidarrClient = require('./lidarrClient');
@@ -482,15 +489,24 @@ class BackgroundJobQueue {
       return cache.get(provider.name);
     };
 
+    const needTypes = ARTIST_IMAGE_TYPES.filter(t => !existingTypes.has(t));
+    logger.info(`Image: artist ${mbid} — need ${needTypes.length}/${ARTIST_IMAGE_TYPES.length} types: [${needTypes.join(', ')}] (${existingTypes.size} already cached)`);
+
     for (const type of ARTIST_IMAGE_TYPES) {
+      let found = false;
       for (const provider of providers) {
         const images = await getImages(provider);
         const match = images.find(img => img.CoverType === type);
         if (match) {
+          logger.info(`Image: artist ${mbid} ${type} — found at ${match.Provider || provider.name}`);
           await this._storeImageUrls('artist', mbid, [match], match.Provider || provider.name, force);
+          found = true;
           break;
+        } else {
+          logger.info(`Image: artist ${mbid} ${type} — not found at ${provider.name}, trying next`);
         }
       }
+      if (!found) logger.warn(`Image: artist ${mbid} ${type} — not found at any provider`);
     }
   }
 
@@ -536,15 +552,25 @@ class BackgroundJobQueue {
       return cache.get(provider.name);
     };
 
+    const { title } = result.rows[0];
+    const needTypes = ALBUM_IMAGE_TYPES.filter(t => !existingTypes.has(t));
+    logger.info(`Image: album "${title}" (${mbid}) — need ${needTypes.length}/${ALBUM_IMAGE_TYPES.length} types: [${needTypes.join(', ')}] (${existingTypes.size} already cached)`);
+
     for (const type of ALBUM_IMAGE_TYPES) {
+      let found = false;
       for (const provider of providers) {
         const images = await getImages(provider);
         const match = images.find(img => img.CoverType === type);
         if (match) {
+          logger.info(`Image: album "${title}" ${type} — found at ${match.Provider || provider.name}`);
           await this._storeImageUrls('release_group', mbid, [match], match.Provider || provider.name, force);
+          found = true;
           break;
+        } else {
+          logger.info(`Image: album "${title}" ${type} — not found at ${provider.name}, trying next`);
         }
       }
+      if (!found) logger.warn(`Image: album "${title}" ${type} — not found at any provider`);
     }
   }
 
