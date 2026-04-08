@@ -114,6 +114,9 @@ document.addEventListener('DOMContentLoaded', async () => {
             });
             document.getElementById(`${tabName}-tab`).classList.add('active');
             
+            // Stop log polling when leaving logs tab
+            if (tabName !== 'logs') ui._stopLogPolling();
+
             // Load tab-specific content
             if (tabName === 'browser') {
                 ui.loadMetadataBrowser();
