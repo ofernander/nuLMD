@@ -12,11 +12,8 @@ Metadata manager & server for Lidarr
 - Caches artist & album art to serve to Lidarr locally
 
 
-### Disclaimer
-
-LIDARR - nuLMD is not related to, supported, or endorsed by the official Lidarr dev team
-
-Ai - Vibe coded with intention, understanding, & oversight. 
+## A.I. Disclosure 
+Coding agents were used extensively for the development of this project with oversight and understanding of all core functions. The developer is committed to actively maintaining and improving the project. 
 
 ## Requirements
 
