@@ -13,7 +13,7 @@ Metadata manager & server for Lidarr
 
 
 ## A.I. Disclosure 
-Coding agents were used extensively for the development of this project with oversight and understanding of all core functions. The developer is committed to actively maintaining and improving the project. 
+Coding agents were used for the development of this project with oversight and understanding of all core functions.
 
 ## Requirements
 
