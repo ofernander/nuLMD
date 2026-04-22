@@ -824,10 +824,21 @@ router.get('/jobs/recent', async (req, res, next) => {
           END::bigint as track_count,
           NULL::text as cover_type,
           NULL::text as image_provider
-        FROM metadata_jobs j
+        FROM (
+          SELECT *
+          FROM metadata_jobs
+          WHERE status IN ('processing', 'pending', 'completed', 'failed')
+          ORDER BY
+            CASE status
+              WHEN 'processing' THEN 0
+              WHEN 'pending'    THEN 1
+              ELSE 2
+            END ASC,
+            created_at DESC
+          LIMIT 500
+        ) j
         LEFT JOIN artists a ON a.mbid = j.entity_mbid
-        LEFT JOIN release_groups rg ON rg.mbid = j.entity_mbid
-        WHERE j.status IN ('processing', 'pending', 'completed', 'failed')`);
+        LEFT JOIN release_groups rg ON rg.mbid = j.entity_mbid`);
     }
 
     if (includeDownloads) {
