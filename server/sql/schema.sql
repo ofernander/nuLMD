@@ -286,6 +286,7 @@ CREATE INDEX IF NOT EXISTS idx_metadata_jobs_entity ON metadata_jobs(entity_type
 CREATE INDEX IF NOT EXISTS idx_metadata_jobs_pending ON metadata_jobs(status) WHERE status = 'pending';
 CREATE INDEX IF NOT EXISTS idx_metadata_jobs_parent ON metadata_jobs(parent_job_id);
 CREATE INDEX IF NOT EXISTS idx_metadata_jobs_root_artist ON metadata_jobs(root_artist_mbid) WHERE root_artist_mbid IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_metadata_jobs_created_at ON metadata_jobs(created_at DESC);
 
 -- Request log table (persists Lidarr/provider request feed across restarts)
 CREATE TABLE IF NOT EXISTS request_log (

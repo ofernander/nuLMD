@@ -124,6 +124,11 @@ class Database {
         ON metadata_jobs(root_artist_mbid)
         WHERE root_artist_mbid IS NOT NULL;
     `);
+
+    await this.query(`
+      CREATE INDEX IF NOT EXISTS idx_metadata_jobs_created_at
+        ON metadata_jobs(created_at DESC);
+    `);
     
     logger.info('Column migrations complete');
   }

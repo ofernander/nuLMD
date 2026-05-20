@@ -126,11 +126,57 @@ app.get('/search', async (req, res) => {
 app.use('/api', routes);
 
 // Health check
-app.get('/health', (req, res) => {
-  res.json({
-    status: 'ok',
+app.get('/health', async (req, res) => {
+  const DB_TIMEOUT_MS = 2000;
+
+  const dbCheck = (async () => {
+    try {
+      const t0 = Date.now();
+      await Promise.race([
+        database.query('SELECT 1'),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), DB_TIMEOUT_MS))
+      ]);
+      return { ok: true, latency_ms: Date.now() - t0 };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  })();
+
+  const lidarrCheck = (async () => {
+    try {
+      const s = lidarrClient.getStats();
+      return { ok: !s.enabled || s.connected, enabled: !!s.enabled, connected: !!s.connected };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  })();
+
+  const queueCheck = (async () => {
+    try {
+      const s = await backgroundJobQueue.getStats();
+      return { ok: true, active: s.processing || 0, pending: s.pending || 0 };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  })();
+
+  const [database_, lidarr_, job_queue_] = await Promise.all([dbCheck, lidarrCheck, queueCheck]);
+  const checks = { database: database_, lidarr: lidarr_, job_queue: job_queue_ };
+
+  // Status determination:
+  //   unhealthy (503) — DB broken; restart-worthy
+  //   degraded (200)  — non-critical dependency broken; do not restart
+  //   ok (200)        — everything works
+  let status;
+  if (!checks.database.ok) status = 'unhealthy';
+  else if (!checks.lidarr.ok) status = 'degraded';
+  else status = 'ok';
+
+  res.status(status === 'unhealthy' ? 503 : 200).json({
+    status,
     version: require('../package.json').version,
-    uptime: process.uptime()
+    uptime_seconds: Math.round(process.uptime()),
+    checks
   });
 });
 

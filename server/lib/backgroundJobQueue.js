@@ -92,6 +92,7 @@ class BackgroundJobQueue {
       if (status !== 'completed') {
         logger.info(`Queued job ${jobId}: ${jobType} for ${entityType} ${entityMbid}`);
       }
+      this._maybePrune().catch(err => logger.warn(`Job prune error: ${err.message}`));
       return jobId;
     } catch (error) {
       logger.error('Failed to queue job:', error);
@@ -124,6 +125,7 @@ class BackgroundJobQueue {
 
       const jobId = result.rows[0].id;
       logger.info(`Force-queued job ${jobId}: ${jobType} for ${entityType} ${entityMbid}`);
+      this._maybePrune().catch(err => logger.warn(`Job prune error: ${err.message}`));
       return jobId;
     } catch (error) {
       logger.error('Failed to force-queue job:', error);
@@ -623,13 +625,34 @@ class BackgroundJobQueue {
   }
 
   async _cleanupOldJobs() {
+    // Keep the most recent 500 terminal-state jobs; delete the rest.
+    // Active jobs (pending/processing) are never touched.
     const result = await database.query(`
       DELETE FROM metadata_jobs
-      WHERE status = 'completed' AND completed_at < NOW() - INTERVAL '7 days'
+      WHERE status IN ('completed', 'failed')
+        AND id NOT IN (
+          SELECT id FROM metadata_jobs
+          WHERE status IN ('completed', 'failed')
+          ORDER BY created_at DESC
+          LIMIT 500
+        )
       RETURNING id
     `);
     if (result.rows.length > 0) {
-      logger.info(`Cleaned up ${result.rows.length} old completed jobs`);
+      logger.info(`Pruned ${result.rows.length} old terminal-state jobs (retention: 500)`);
+    }
+  }
+
+  async _maybePrune() {
+    // Cheap check: only invoke cleanup when terminal-state row count exceeds threshold.
+    // Avoids running DELETE on every insert during quiet periods.
+    const PRUNE_THRESHOLD = 600;
+    const result = await database.query(`
+      SELECT COUNT(*)::int as n FROM metadata_jobs
+      WHERE status IN ('completed', 'failed')
+    `);
+    if (result.rows[0].n >= PRUNE_THRESHOLD) {
+      await this._cleanupOldJobs();
     }
   }
 
