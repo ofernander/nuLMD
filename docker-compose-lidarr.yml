@@ -30,9 +30,6 @@ services:
     environment:
       - SERVER_URL=http://nulmd-server:5001
       - PORT=5001
-      - CACHE_ENABLED=true
-      - CACHE_TTL=3600
-      - CACHE_MAX_SIZE=1000
       - LOG_LEVEL=info
       - POSTGRES_HOST=nulmd-db
       - POSTGRES_PORT=5432
@@ -41,6 +38,10 @@ services:
       - POSTGRES_PASSWORD=changeme
       - LIDARR_URL=http://lidarr:8686
       - LIDARR_API_KEY=
+      # Optional: extra metadata servers (see README, "Multiple MusicBrainz sources"). Format: url|priority|rateLimitMs
+      # Official Lidarr, brainzmash and musicbrainz.org are fixed at 1 request / 2s; rate limit is ignored for them.
+      #- MUSICBRAINZ_SOURCES=http://mb1:5000/ws/2|1|0,https://musicbrainz.org/ws/2|2
+      #- LMD_UPSTREAMS=https://api.lidarr.audio/api/v0.4|2
     restart: unless-stopped
     depends_on:
       nulmd-db:

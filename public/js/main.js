@@ -35,6 +35,10 @@ const api = {
         });
     },
 
+    async delete(endpoint) {
+        return this.request(endpoint, { method: 'DELETE' });
+    },
+
     // Specific API methods
     async getVersion() {
         return this.get('/version');
@@ -50,14 +54,6 @@ const api = {
 
     async updateConfig(data) {
         return this.post('/config', data);
-    },
-
-    async getCacheStats() {
-        return this.get('/cache/stats');
-    },
-
-    async flushCache() {
-        return this.post('/cache/flush');
     },
 
     async getProviders() {
@@ -98,7 +94,19 @@ const api = {
 
 // Initialize the application
 document.addEventListener('DOMContentLoaded', async () => {
-    
+
+    // Header Controls menu: opens on click and stays open while you work (the trim and restart items show their progress
+    // on themselves); closes on a click outside it or Esc
+    const controlsMenu = document.getElementById('controlsMenu');
+    if (controlsMenu) {
+        const trigger = controlsMenu.querySelector('.menu-trigger');
+        const panel = controlsMenu.querySelector('.menu-panel');
+        const setOpen = open => { panel.hidden = !open; trigger.setAttribute('aria-expanded', String(open)); };
+        trigger.addEventListener('click', () => setOpen(panel.hidden));
+        document.addEventListener('click', e => { if (!controlsMenu.contains(e.target)) setOpen(false); });
+        document.addEventListener('keydown', e => { if (e.key === 'Escape') setOpen(false); });
+    }
+
     // Setup tab switching
     document.querySelectorAll('.tab').forEach(tab => {
         tab.addEventListener('click', () => {

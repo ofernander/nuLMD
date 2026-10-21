@@ -1,7 +1,8 @@
 const axios = require('axios');
 const { logger } = require('../lib/logger');
 const database = require('../sql/database');
-const { logConnection } = require('../lib/request');
+const { logConnection, settleCall } = require('../lib/request');
+const { USER_AGENT } = require('../lib/userAgent');
 
 /**
  * Deezer Provider — free, no API key required
@@ -19,6 +20,7 @@ class DeezerProvider {
     this._albumMapCache = new Map();
     this._albumMapCacheTime = new Map();
     this._albumMapTTL = 3600000; // 1 hour
+    this._albumMapInflight = new Map();   // artistName → the lookup in progress, shared by every album asking at once
   }
 
   async initialize() {
@@ -49,11 +51,12 @@ class DeezerProvider {
     if (!artistName) return null;
 
     try {
-      logConnection({ direction: 'outbound', label: 'Deezer', detail: `${this.baseURL}/search/artist?q=${encodeURIComponent(artistName)}`, status: 'ok' });
-      const response = await axios.get(`${this.baseURL}/search/artist`, {
+      const call = logConnection({ direction: 'outbound', label: 'Deezer', detail: `${this.baseURL}/search/artist?q=${encodeURIComponent(artistName)}`, status: 'ok' });
+      const response = await settleCall(call, axios.get(`${this.baseURL}/search/artist`, {
         params: { q: artistName, limit: 5 },
-        timeout: this.timeout
-      });
+        timeout: this.timeout,
+        headers: { 'User-Agent': USER_AGENT }
+      }));
 
       const artists = response.data?.data;
       if (!artists?.length) return null;
@@ -104,6 +107,15 @@ class DeezerProvider {
     if (cachedTime && Date.now() - cachedTime < this._albumMapTTL) {
       return this._albumMapCache.get(cacheKey);
     }
+    // Several albums of one artist ask at the same moment (the image workers run side by side): they share one lookup
+    // instead of each searching Deezer and fetching the same album list
+    if (!this._albumMapInflight.has(cacheKey)) {
+      this._albumMapInflight.set(cacheKey, this._loadArtistAlbumMap(artistName, cacheKey).finally(() => this._albumMapInflight.delete(cacheKey)));
+    }
+    return this._albumMapInflight.get(cacheKey);
+  }
+
+  async _loadArtistAlbumMap(artistName, cacheKey) {
 
     const artist = await this._searchArtist(artistName);
     if (!artist?.id) {
@@ -114,11 +126,12 @@ class DeezerProvider {
     }
 
     try {
-      logConnection({ direction: 'outbound', label: 'Deezer', detail: `${this.baseURL}/artist/${artist.id}/albums`, status: 'ok' });
-      const response = await axios.get(`${this.baseURL}/artist/${artist.id}/albums`, {
+      const call = logConnection({ direction: 'outbound', label: 'Deezer', detail: `${this.baseURL}/artist/${artist.id}/albums`, status: 'ok' });
+      const response = await settleCall(call, axios.get(`${this.baseURL}/artist/${artist.id}/albums`, {
         params: { limit: 100 },
-        timeout: this.timeout
-      });
+        timeout: this.timeout,
+        headers: { 'User-Agent': USER_AGENT }
+      }));
 
       const albums = response.data?.data || [];
       const map = new Map();
@@ -219,10 +232,11 @@ class DeezerProvider {
     if (!artist?.id) return null;
 
     try {
-      logConnection({ direction: 'outbound', label: 'Deezer', detail: `${this.baseURL}/artist/${artist.id}`, status: 'ok' });
-      const response = await axios.get(`${this.baseURL}/artist/${artist.id}`, {
-        timeout: this.timeout
-      });
+      const call = logConnection({ direction: 'outbound', label: 'Deezer', detail: `${this.baseURL}/artist/${artist.id}`, status: 'ok' });
+      const response = await settleCall(call, axios.get(`${this.baseURL}/artist/${artist.id}`, {
+        timeout: this.timeout,
+        headers: { 'User-Agent': USER_AGENT }
+      }));
       const data = response.data;
       const bio = data?.biography || data?.bio || data?.description || null;
       if (typeof bio === 'string' && bio.trim()) {

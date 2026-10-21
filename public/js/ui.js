@@ -10,7 +10,9 @@ const JOB_LABELS = {
     artist_full:         'Full Artist Fetch',
     artist_releases:     'Artist Releases',
     release_tracks:      'Track Data',
-    image_download:      'Image Download'
+    image_download:      'Image Download',
+    backfill_artist:     'MB Backfill · Artist',
+    backfill_album:      'MB Backfill · Album'
 };
 
 // UI management functions
@@ -115,6 +117,17 @@ const ui = {
                 lidarrEl.style.color = 'var(--text-secondary)';
             }
             document.getElementById('dashboardArtistCount').textContent = stats.database.artists.toLocaleString();
+            const catalogs = stats.database.catalogs;
+            if (catalogs) {
+                const parts = [];
+                if (catalogs.verified) parts.push(`${catalogs.verified.toLocaleString()} checked`);
+                if (catalogs.unverified) parts.push(`${catalogs.unverified.toLocaleString()} older`);
+                if (catalogs.provisional) parts.push(`${catalogs.provisional.toLocaleString()} provisional`);
+                if (catalogs.incomplete) parts.push(`${catalogs.incomplete.toLocaleString()} incomplete`);
+                const el = document.getElementById('dashboardCatalogs');
+                el.textContent = parts.join(' · ');
+                el.title = 'Catalogs: checked = verified against MusicBrainz; older = stored before that check, renewed at their TTL; provisional = taken from an upstream while MusicBrainz was down; incomplete = not fetched yet';
+            }
             document.getElementById('dashboardAlbumCount').textContent = stats.database.albums.toLocaleString();
             document.getElementById('dashboardReleaseCount').textContent = stats.database.releases.toLocaleString();
             document.getElementById('dashboardTrackCount').textContent = stats.database.tracks.toLocaleString();
@@ -151,6 +164,7 @@ const ui = {
     },
 
     async loadMetadataSources() {
+        this.loadSourcesEditor();
         const container = document.getElementById('metadataSourcesForm');
         container.innerHTML = '<p>Loading metadata sources...</p>';
 
@@ -160,7 +174,8 @@ const ui = {
             let html = '';
 
             // Skip mandatory providers and non-functional providers
-            const skipProviders = ['wikipedia', 'theaudiodb'];
+            // (MusicBrainz is managed in the Metadata Servers card above)
+            const skipProviders = ['wikipedia', 'theaudiodb', 'musicbrainz'];
 
             // Create cards for each provider
             for (const [name, settings] of Object.entries(config.providers || {})) {
@@ -172,22 +187,22 @@ const ui = {
                 html += `<div class="card" style="margin-bottom: 15px;">`;
                 html += `<h3>${providerName}</h3>`;
                 
-                // MusicBrainz: No enable toggle, just custom URL + fetch type config
-                if (name === 'musicbrainz') {
-                    html += '<div class="form-group">';
-                    html += `<label for="providers.${name}.baseUrl">Custom Server URL (optional)</label>`;
-                    html += `<input type="text" class="form-control" id="providers.${name}.baseUrl" value="${settings.baseUrl || ''}" placeholder="https://musicbrainz.org/ws/2">`;
-                    html += '<small class="form-text">Leave empty to use default MusicBrainz server</small>';
-                    html += '</div>';
-                } else {
-                    // Other providers: Show enable toggle
-                    html += '<div class="form-group">';
-                    html += `<label for="providers.${name}.enabled">`;
-                    html += `<input type="checkbox" id="providers.${name}.enabled" `;
-                    html += `${settings.enabled ? 'checked' : ''}> Enabled`;
-                    html += '</label>';
-                    html += '</div>';
-                    
+                {
+                    // Other providers: Show enable toggle. Fanart has none: it is on when it has a key (the environment's wins)
+                    if (name === 'fanart') {
+                        html += '<small class="form-text" style="display:block; margin-bottom: 0.75rem;">';
+                        html += settings.enabled ? 'On. Remove the key and restart the server to turn it off.' : 'Enter API key to enable';
+                        if (settings.apiKeyFromEnv) html += ' The key is set by FANART_API_KEY in the environment and can only be changed in the compose file.';
+                        html += '</small>';
+                    } else {
+                        html += '<div class="form-group">';
+                        html += `<label for="providers.${name}.enabled">`;
+                        html += `<input type="checkbox" id="providers.${name}.enabled" `;
+                        html += `${settings.enabled ? 'checked' : ''}> Enabled`;
+                        html += '</label>';
+                        html += '</div>';
+                    }
+
                     // API Key field — show for any provider that has apiKey, token, or clientSecret in config,
                     // or for known providers that need keys
                     const needsApiKey = ['fanart', 'lastfm', 'discogs'];
@@ -195,7 +210,7 @@ const ui = {
                         html += '<div class="form-group">';
                         html += `<label for="providers.${name}.apiKey">API Key</label>`;
                         const displayValue = settings.apiKey && settings.apiKey !== '' ? settings.apiKey : '';
-                        html += `<input type="text" class="form-control" id="providers.${name}.apiKey" value="${displayValue}" placeholder="Enter API key">`;
+                        html += `<input type="text" class="form-control" id="providers.${name}.apiKey" value="${displayValue}" placeholder="Enter API key"${settings.apiKeyFromEnv ? ' disabled' : ''}>`;
                         html += '</div>';
                     }
                 }
@@ -211,6 +226,415 @@ const ui = {
         } catch (error) {
             console.error('Failed to load metadata sources:', error);
             container.innerHTML = '<p class="alert alert-danger">Failed to load metadata sources</p>';
+        }
+    },
+
+    // ─── Metadata servers (MusicBrainz sources + Lidarr metadata upstreams) ─────────
+
+    sourcesModel: [],
+    sourcesDirty: false,
+    sourcesPollTimeout: null,
+    _backfillInfo: null,
+    _backfillFetchedAt: 0,
+
+    hostOf(url) {
+        return String(url || '').replace(/^https?:\/\//i, '').split('/')[0] || url || '';
+    },
+
+    // Politeness policy. Mirrors server/lib/mbSources.js, which is the authority and enforces it on save;
+    // this just keeps the form honest as you type. The three big public servers (official MusicBrainz,
+    // the official Lidarr metadata server, brainzmash) are fixed at 1 request / 2 s, one at a time.
+    // Any other remote server defaults to 2 s but can be changed.
+    _hostOf(url) {
+        const m = String(url || '').trim().match(/^https?:\/\/(\[[^\]]+\]|[^/:?#]+)/i);
+        return m ? m[1].replace(/^\[|\]$/g, '').toLowerCase().replace(/\.$/, '') : '';
+    },
+
+    protectedDomain(url) {
+        const host = this._hostOf(url);
+        return ['musicbrainz.org', 'lidarr.audio', 'brainzmash.cc'].find(d => host === d || host.endsWith('.' + d)) || null;
+    },
+
+    isLocalHost(url) {
+        const host = this._hostOf(url);
+        if (!host) return false;
+        if (host === 'localhost' || /\.(localhost|local|lan|internal|home\.arpa)$/.test(host)) return true;
+        if (!host.includes('.') && !host.includes(':')) return true;
+        const v4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+        if (v4) {
+            const a = Number(v4[1]), b = Number(v4[2]);
+            return a === 127 || a === 10 || a === 0 || (a === 172 && b >= 16 && b <= 31) ||
+                (a === 192 && b === 168) || (a === 169 && b === 254) || (a === 100 && b >= 64 && b <= 127);
+        }
+        if (host.includes(':')) return host === '::1' || host === '::' || /^f[cd]/.test(host) || /^fe[89ab]/.test(host);
+        return false;
+    },
+
+    // What the form should do for this URL: locked values, or defaults the user may change
+    policyFor(url, type) {
+        const domain = this.protectedDomain(url);
+        if (domain) {
+            const names = { 'musicbrainz.org': 'Official MusicBrainz', 'lidarr.audio': 'Official Lidarr metadata', 'brainzmash.cc': 'Community brainzmash' };
+            return { locked: true, rate: 2000, par: 1,
+                note: `${names[domain]} server: fixed at 1 request every 2 seconds, one at a time. This protects a shared public resource.` };
+        }
+        const remote = String(url || '').trim() !== '' && !this.isLocalHost(url);
+        const rate = remote ? 2000 : (type === 'lmd' ? 1000 : 0);
+        const par = remote ? 2 : (type === 'lmd' ? 2 : 4);
+        return { locked: false, rate, par,
+            note: remote ? 'Remote server: defaults to 1 request every 2 seconds. Please be kind to servers you don\'t run.' : '' };
+    },
+
+    // Bring a row's rate/parallel inputs in line with the policy for its URL
+    _applyPolicy(i) {
+        const s = this.sourcesModel[i];
+        const row = document.querySelector(`#sourcesEditor .src-row[data-src="${i}"]`);
+        if (!s || !row) return;
+        const policy = this.policyFor(s.url, s.type);
+        const rate = row.querySelector('.src-rate');
+        const par = row.querySelector('.src-par');
+        if (!s.fromEnv) {
+            if (policy.locked) {
+                s.rateLimitMs = policy.rate;
+                s.maxConcurrent = policy.par;
+                s._wasLocked = true;
+            } else if (s._wasLocked || s._auto) {
+                // Left a locked/auto-filled state: go back to the defaults for this kind of URL
+                s.rateLimitMs = policy.rate;
+                s.maxConcurrent = policy.par;
+                s._wasLocked = false;
+            }
+        }
+        if (rate) { rate.value = s.rateLimitMs ?? ''; rate.disabled = !!s.fromEnv || policy.locked; }
+        if (par) { par.value = s.maxConcurrent ?? ''; par.disabled = !!s.fromEnv || policy.locked; }
+        const note = row.querySelector('.src-note');
+        if (note) note.textContent = policy.note;
+    },
+
+    // Once you set a value yourself, stop auto-filling it
+    srcCommit(i, field, el) {
+        const s = this.sourcesModel[i];
+        if (s) s._auto = false;
+        this.srcSet(i, field, el.value);
+    },
+
+    async loadSourcesEditor() {
+        const container = document.getElementById('sourcesEditor');
+        if (!container) return;
+        if (this.sourcesDirty) { this.startSourcesPolling(); return; } // don't wipe unsaved edits
+        try {
+            const data = await api.get('/sources');
+            this.sourcesModel = data.sources.map(s => ({ ...s }));
+            this.renderSourcesEditor();
+            this.startSourcesPolling();
+        } catch (error) {
+            console.error('Failed to load metadata servers:', error);
+            container.innerHTML = '<p class="alert alert-danger">Failed to load metadata servers</p>';
+        }
+    },
+
+    renderSourcesEditor() {
+        const container = document.getElementById('sourcesEditor');
+        if (!container) return;
+        const rows = this.sourcesModel.map((s, i) => this._sourceRowHtml(s, i)).join('');
+        container.innerHTML = `
+            ${rows || '<div class="src-empty">No servers configured</div>'}
+            <div class="src-editor-actions">
+                <button class="btn btn-secondary btn-sm" onclick="ui.addSource('musicbrainz')">+ MusicBrainz server</button>
+                <button class="btn btn-secondary btn-sm" onclick="ui.addSource('lmd')">+ Lidarr metadata server</button>
+                <span style="flex:1"></span>
+                <span class="src-dirty" id="sourcesDirty" ${this.sourcesDirty ? '' : 'hidden'}>Unsaved changes</span>
+                <button class="btn btn-primary" onclick="ui.saveSources()">Save &amp; Apply</button>
+            </div>
+            <div class="src-hint">Changes apply immediately, no restart needed. MusicBrainz always stays in the mix: it is the authority, answers anything a Lidarr metadata server can't, and fills in missing details when nuLMD is idle. The shared public servers (official MusicBrainz, the official Lidarr server and brainzmash) are fixed at one request every 2 seconds; other remote servers default to the same but you can change it.</div>`;
+    },
+
+    _sourceRowHtml(s, i) {
+        const e = v => this.escapeHtml(String(v ?? '')).replace(/"/g, '&quot;');
+        const locked = !!s.fromEnv;
+        const policy = this.policyFor(s.url, s.type);
+        const official = !!s.isOfficial;
+        const lmd = s.type === 'lmd';
+        const dis = locked ? 'disabled' : '';
+        const badges = [
+            `<span class="src-badge ${lmd ? 'lmd' : ''}">${lmd ? 'LMD' : 'MusicBrainz'}</span>`,
+            locked ? '<span class="src-badge env" title="Set by an environment variable in your compose file; edit it there">compose</span>' : '',
+            policy.locked ? '<span class="src-badge" title="Shared public server: fixed at 1 request every 2 seconds">public · 2s fixed</span>' : ''
+        ].join(' ');
+        return `
+        <div class="src-row ${locked ? 'is-env' : ''}" data-src="${i}">
+            <div class="src-row-main">
+                <label class="src-toggle"><input type="checkbox" ${s.enabled ? 'checked' : ''} ${dis} onchange="ui.srcSet(${i}, 'enabled', this.checked)"> On</label>
+                <div class="src-field">
+                    <label>Type</label>
+                    <select class="form-control" ${s.new ? '' : 'disabled'} onchange="ui.srcSet(${i}, 'type', this.value)">
+                        <option value="musicbrainz" ${!lmd ? 'selected' : ''}>MusicBrainz</option>
+                        <option value="lmd" ${lmd ? 'selected' : ''}>Lidarr metadata</option>
+                    </select>
+                </div>
+                <div class="src-field url">
+                    <label>URL</label>
+                    <input type="text" class="form-control" value="${e(s.url)}" ${dis} placeholder="${lmd ? 'https://api.lidarr.audio/api/v0.4' : 'http://localhost:5000/ws/2'}" oninput="ui.srcSet(${i}, 'url', this.value); ui._applyPolicy(${i})">
+                </div>
+                <div class="src-field">
+                    <label title="Lower is tried first. Same number = take turns.">Priority</label>
+                    <input type="number" class="form-control" min="1" max="99" value="${e(s.priority)}" ${dis} oninput="ui.srcSet(${i}, 'priority', this.value)">
+                </div>
+                <div class="src-field">
+                    <label title="Minimum milliseconds between requests. 0 = no limit.">Rate limit (ms)</label>
+                    <input type="number" class="form-control src-rate" min="0" value="${e(s.rateLimitMs)}" ${locked || policy.locked ? 'disabled' : ''} onchange="ui.srcCommit(${i}, 'rateLimitMs', this)">
+                </div>
+                <div class="src-field">
+                    <label title="How many requests may be in flight at once.">Max parallel</label>
+                    <input type="number" class="form-control src-par" min="1" max="32" value="${e(s.maxConcurrent)}" ${locked || policy.locked ? 'disabled' : ''} onchange="ui.srcCommit(${i}, 'maxConcurrent', this)">
+                </div>
+                <div class="src-row-actions">
+                    <button class="btn btn-secondary btn-sm" onclick="ui.testSource(${i})">Test</button>
+                    ${locked ? '' : `<button class="btn btn-danger btn-sm" onclick="ui.removeSource(${i})">Remove</button>`}
+                </div>
+            </div>
+            <div class="src-row-foot">
+                <span class="src-dot ${s.enabled ? '' : 'disabled'}" id="srcDot${i}"></span>
+                ${badges}
+                <span id="srcLive${i}"></span>
+                <span class="src-test-result" id="srcTest${i}"></span>
+                <span class="src-note">${this.escapeHtml(policy.note)}</span>
+            </div>
+        </div>`;
+    },
+
+    srcSet(i, field, value) {
+        const s = this.sourcesModel[i];
+        if (!s) return;
+        if (field === 'type') {
+            s.type = value;
+            if (s.new) { const p = this.policyFor(s.url, value); s.rateLimitMs = p.rate; s.maxConcurrent = p.par; s._auto = true; }
+            this.sourcesDirty = true;
+            this.renderSourcesEditor();
+            return;
+        }
+        s[field] = value;
+        this.sourcesDirty = true;
+        const flag = document.getElementById('sourcesDirty');
+        if (flag) flag.hidden = false;
+    },
+
+    addSource(type) {
+        this.sourcesModel.push({
+            type, url: '', priority: 1, enabled: true, fromEnv: false, isOfficial: false, new: true,
+            rateLimitMs: type === 'lmd' ? 1000 : 0, maxConcurrent: type === 'lmd' ? 2 : 4, live: null, _auto: true
+        });
+        this.sourcesDirty = true;
+        this.renderSourcesEditor();
+        const urls = document.querySelectorAll('#sourcesEditor .src-field.url input');
+        if (urls.length) urls[urls.length - 1].focus();
+    },
+
+    removeSource(i) {
+        const s = this.sourcesModel[i];
+        if (!s) return;
+        if (s.url && !confirm(`Remove ${s.url}?`)) return;
+        this.sourcesModel.splice(i, 1);
+        this.sourcesDirty = true;
+        this.renderSourcesEditor();
+    },
+
+    async testSource(i) {
+        const s = this.sourcesModel[i];
+        const out = document.getElementById(`srcTest${i}`);
+        if (!s || !out) return;
+        if (!String(s.url || '').trim()) { out.className = 'src-test-result bad'; out.textContent = 'Enter a URL first'; return; }
+        out.className = 'src-test-result';
+        out.textContent = 'Testing…';
+        try {
+            const r = await api.post('/sources/test', { url: s.url, type: s.type });
+            out.className = `src-test-result ${r.ok ? 'ok' : 'bad'}`;
+            out.textContent = r.ok ? `✓ ${r.detail}` : `✗ ${r.detail}`;
+        } catch (error) {
+            out.className = 'src-test-result bad';
+            out.textContent = `✗ ${error.message}`;
+        }
+    },
+
+    async saveSources() {
+        try {
+            // A URL already set by compose can't also be managed here: the environment wins
+            const envUrls = new Set(this.sourcesModel.filter(s => s.fromEnv).map(s => String(s.url).replace(/\/+$/, '').toLowerCase()));
+            const clash = this.sourcesModel.find(s => !s.fromEnv && envUrls.has(String(s.url || '').trim().replace(/\/+$/, '').toLowerCase()));
+            if (clash) {
+                this.showError(`${clash.url} is already set in your compose file; edit or remove it there`);
+                return;
+            }
+            const payload = this.sourcesModel.filter(s => !s.fromEnv).map(s => {
+                const entry = { type: s.type, url: String(s.url || '').trim(), priority: s.priority, enabled: !!s.enabled };
+                if (!this.policyFor(s.url, s.type).locked) {
+                    if (s.rateLimitMs !== '' && s.rateLimitMs !== undefined && s.rateLimitMs !== null) entry.rateLimitMs = s.rateLimitMs;
+                    if (s.maxConcurrent !== '' && s.maxConcurrent !== undefined && s.maxConcurrent !== null) entry.maxConcurrent = s.maxConcurrent;
+                }
+                if (s.enabledOps) entry.enabledOps = s.enabledOps;
+                return entry;
+            });
+            const result = await api.request('/sources', { method: 'PUT', body: JSON.stringify({ sources: payload }) });
+            this.sourcesDirty = false;
+            this.showSuccess('Metadata servers applied');
+            (result.adjusted || []).forEach(note => this.showMessage(note, 'info'));
+            await this.loadSourcesEditor();
+            this.refreshSourcesStrip();
+        } catch (error) {
+            this.showError(error.message || 'Failed to save metadata servers');
+        }
+    },
+
+    _liveText(s, live) {
+        if (!s.enabled) return 'Disabled';
+        if (!live) return s.new ? 'Not active until you save' : 'Not active yet';
+        const state = { closed: 'Healthy', 'half-open': 'Testing after failures', open: 'Paused after repeated failures' }[live.breaker] || live.breaker;
+        const bits = [state, `${live.inflight} in flight`, `${live.served} served`, `${live.failed} failed`];
+        return bits.join(' · ');
+    },
+
+    _liveDot(s, live) {
+        if (!s.enabled) return 'disabled';
+        if (!live) return 'disabled';
+        if (live.breaker === 'closed' && live.inflight > 0) return 'busy';
+        return live.breaker;
+    },
+
+    startSourcesPolling() {
+        if (this.sourcesPollTimeout) clearTimeout(this.sourcesPollTimeout);
+        const tick = async () => {
+            const tab = document.getElementById('sources-tab');
+            if (!tab || !tab.classList.contains('active')) { this.sourcesPollTimeout = null; return; }
+            try {
+                const data = await api.get('/sources');
+                const liveByUrl = new Map(data.sources.map(s => [String(s.url).replace(/\/+$/, '').toLowerCase(), s.live]));
+                this.sourcesModel.forEach((s, i) => {
+                    const live = s.new ? null : liveByUrl.get(String(s.url || '').replace(/\/+$/, '').toLowerCase()) || null;
+                    s.live = live;
+                    const text = document.getElementById(`srcLive${i}`);
+                    const dot = document.getElementById(`srcDot${i}`);
+                    if (text) {
+                        text.innerHTML = this.escapeHtml(this._liveText(s, live)) +
+                            (live && live.lastError ? ` <span class="src-err" title="${this.escapeHtml(live.lastError).replace(/"/g, '&quot;')}">· ${this.escapeHtml(live.lastError.slice(0, 90))}</span>` : '');
+                    }
+                    if (dot) dot.className = `src-dot ${this._liveDot(s, live)}`;
+                });
+            } catch (_) { /* transient; try again */ }
+            this.sourcesPollTimeout = setTimeout(tick, 2000);
+        };
+        tick();
+    },
+
+    // Compact per-source status above the Database Jobs list
+    async refreshSourcesStrip() {
+        const el = document.getElementById('sourcesStrip');
+        if (!el) return;
+        try {
+            const data = await api.get('/sources');
+            const now = Date.now();
+            if (now - this._backfillFetchedAt > 10000) {
+                this._backfillFetchedAt = now;
+                try { this._backfillInfo = await api.get('/backfill'); } catch (_) { /* keep last */ }
+            }
+            const bf = this._backfillInfo;
+            const waiting = bf ? (bf.artists + bf.albums) : 0;
+            const showBackfill = !!bf && (waiting > 0 || bf.queued > 0 || bf.running > 0);
+
+            if (data.sources.length < 2 && !showBackfill) { el.hidden = true; return; }
+
+            const chips = data.sources.length < 2 ? [] : data.sources.map(s => {
+                const live = s.live;
+                const dot = this._liveDot(s, live);
+                const state = !s.enabled ? 'disabled' : (live ? live.breaker : 'inactive');
+                const meta = live ? `${live.inflight ? live.inflight + ' active · ' : ''}${live.served} served${live.failed ? ' · ' + live.failed + ' failed' : ''}` : (s.enabled ? 'starting' : 'off');
+                const tip = [s.url, live && live.lastError ? `Last error: ${live.lastError}` : ''].filter(Boolean).join('\n');
+                return `<div class="src-chip ${state === 'open' ? 'is-open' : ''} ${!s.enabled ? 'is-disabled' : ''}" title="${this.escapeHtml(tip).replace(/"/g, '&quot;')}">
+                    <span class="src-dot ${dot}"></span>
+                    <span class="src-host">${this.escapeHtml(this.hostOf(s.url))}</span>
+                    <span class="src-badge ${s.type === 'lmd' ? 'lmd' : ''}">${s.type === 'lmd' ? 'LMD' : 'MB'}</span>
+                    <span class="src-meta">P${s.priority} · ${this.escapeHtml(meta)}</span>
+                </div>`;
+            });
+
+            if (showBackfill) {
+                const state = bf.running > 0 ? 'filling gaps from MusicBrainz' : (bf.idle ? 'starting soon' : 'waiting for quiet');
+                chips.push(`<div class="src-chip backfill" title="Rows from a Lidarr metadata server are filled in from MusicBrainz when nuLMD is idle">
+                    <span class="src-dot ${bf.running > 0 ? 'busy' : 'disabled'}"></span>
+                    <span class="src-host">MB backfill</span>
+                    <span class="src-meta">${waiting} waiting${bf.queued ? ' · ' + bf.queued + ' queued' : ''} · ${state}</span>
+                </div>`);
+            }
+            el.innerHTML = chips.join('');
+            el.hidden = false;
+        } catch (_) { /* leave as is */ }
+    },
+
+    // ── MusicBrainz API keys (/ws/2) ────────────────────────────────────────────
+
+    async loadWs2Keys() {
+        const status = document.getElementById('ws2KeysStatus');
+        const list = document.getElementById('ws2KeysList');
+        const endpoint = document.getElementById('ws2Endpoint');
+        if (!status || !list) return;
+        if (endpoint) endpoint.textContent = `${location.origin}/ws/2`;
+        try {
+            const { keys, open } = await api.get('/ws2/keys');
+            status.innerHTML = open
+                ? '<span><b>Open</b>No keys yet: anyone who can reach this address can use it</span>'
+                : `<span><b>${keys.length}</b>${keys.length === 1 ? 'key' : 'keys'}</span><span>A key is required on every request</span>`;
+            const when = d => (d ? new Date(d).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—');
+            list.innerHTML = keys.length === 0 ? '' : `
+                <div class="key-row key-head"><span>Name</span><span>Key</span><span>Created</span><span>Last used</span><span>Requests</span><span></span></div>
+                ${keys.map(k => `
+                <div class="key-row">
+                    <span class="key-name">${this.escapeHtml(k.label)}</span>
+                    <span class="key-prefix"><code>${this.escapeHtml(k.prefix)}</code></span>
+                    <span>${k.env ? 'environment' : when(k.createdAt)}</span>
+                    <span>${k.env ? '—' : when(k.lastUsedAt)}</span>
+                    <span>${k.requestCount === null ? '—' : k.requestCount}</span>
+                    <span>${k.env ? '' : `<button class="btn btn-danger btn-sm" onclick="ui.deleteWs2Key('${k.id}')">Remove</button>`}</span>
+                </div>`).join('')}`;
+        } catch (error) {
+            status.textContent = 'Failed to load the API keys';
+        }
+    },
+
+    async createWs2Key() {
+        const input = document.getElementById('ws2.keyLabel');
+        const label = input.value.trim();
+        if (!label) { this.showError('Give the key a name first'); return; }
+        try {
+            const created = await api.post('/ws2/keys', { label });
+            input.value = '';
+            const box = document.getElementById('ws2NewKey');
+            document.getElementById('ws2NewKeyValue').value = created.key;
+            box.hidden = false;
+            document.getElementById('ws2NewKeyValue').select();
+            this.loadWs2Keys();
+        } catch (error) {
+            this.showError(error.message || 'Failed to make the key');
+        }
+    },
+
+    copyWs2Key() {
+        const field = document.getElementById('ws2NewKeyValue');
+        field.select();
+        // The clipboard API only exists on secure pages (https or localhost); nuLMD is often plain http on a LAN
+        const done = () => this.showSuccess('Key copied');
+        if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(field.value).then(done, () => document.execCommand('copy') && done());
+        else if (document.execCommand('copy')) done();
+        else this.showError('Select the key and copy it by hand');
+    },
+
+    async deleteWs2Key(id) {
+        if (!confirm('Remove this key?\n\nAnything still using it stops working straight away. This cannot be undone.')) return;
+        try {
+            await api.delete(`/ws2/keys/${id}`);
+            document.getElementById('ws2NewKey').hidden = true;
+            this.showSuccess('Key removed');
+            this.loadWs2Keys();
+        } catch (error) {
+            this.showError(error.message || 'Failed to remove the key');
         }
     },
 
@@ -298,7 +722,7 @@ const ui = {
                     <tr class="level-0 artist-row" data-artist-id="${artist.mbid}" data-name="${artist.name.toLowerCase()}">
                         <td>
                             <span class="expand-icon" onclick="ui.toggleArtistExpand('${artist.mbid}')">▶</span>
-                            ${this.escapeHtml(artist.name)}
+                            ${this.escapeHtml(artist.name)}${this.catalogBadge(this.catalogStateOf(artist))}
                         </td>
                         <td><a href="https://musicbrainz.org/artist/${artist.mbid}" target="_blank" class="mbid-link" onclick="event.stopPropagation()" title="View on MusicBrainz">${artist.mbid.substring(0, 8)}...</a></td>
                         <td>${artist.type || '-'}</td>
@@ -309,6 +733,8 @@ const ui = {
                         <td>${lastUpdated}</td>
                         <td>
                             <button class="btn-refresh" onclick="ui.refreshArtistMetadata('${artist.mbid}')">Fetch</button>
+                            <button class="btn-refresh danger" onclick="ui.clearMetadata('artist', '${artist.mbid}', this)">Clear</button>
+                            <button class="btn-refresh danger" onclick="ui.blockMetadata('artist', '${artist.mbid}', this)">Block</button>
                             ${this.lidarrEnabled ? `<button class="btn-refresh" style="margin-left:0.25rem;" onclick="ui.refreshInLidarr('${artist.mbid}', this)">Refresh in Lidarr</button>` : ''}
                         </td>
                     </tr>
@@ -459,7 +885,11 @@ const ui = {
                     <td>${album.release_count}</td>
                     <td>${album.track_count}</td>
                     <td colspan="2"></td>
-                    <td><button class="btn-refresh" onclick="event.stopPropagation(); ui.refreshAlbumMetadata('${album.mbid}', '${artistMbid}')">Fetch</button></td>
+                    <td>
+                        <button class="btn-refresh" onclick="event.stopPropagation(); ui.refreshAlbumMetadata('${album.mbid}', '${artistMbid}')">Fetch</button>
+                        <button class="btn-refresh danger" onclick="event.stopPropagation(); ui.clearMetadata('release_group', '${album.mbid}', this)">Clear</button>
+                        <button class="btn-refresh danger" onclick="event.stopPropagation(); ui.blockMetadata('release_group', '${album.mbid}', this)">Block</button>
+                    </td>
                 `;
                 
                 insertAfter.insertAdjacentElement('afterend', albumRow);
@@ -585,7 +1015,7 @@ const ui = {
             row.innerHTML = `
                 <td>
                     <span class="expand-icon" onclick="ui.toggleArtistExpand('${artist.mbid}')">▶</span>
-                    ${this.escapeHtml(artist.name)}
+                    ${this.escapeHtml(artist.name)}${this.catalogBadge(this.catalogStateOf(artist))}
                 </td>
                 <td><a href="https://musicbrainz.org/artist/${artist.mbid}" target="_blank" class="mbid-link" onclick="event.stopPropagation()" title="View on MusicBrainz">${artist.mbid.substring(0, 8)}...</a></td>
                 <td>${artist.type || '-'}</td>
@@ -596,6 +1026,8 @@ const ui = {
                 <td>${lastUpdated}</td>
                 <td>
                     <button class="btn-refresh" onclick="ui.refreshArtistMetadata('${artist.mbid}')">Fetch</button>
+                            <button class="btn-refresh danger" onclick="ui.clearMetadata('artist', '${artist.mbid}', this)">Clear</button>
+                            <button class="btn-refresh danger" onclick="ui.blockMetadata('artist', '${artist.mbid}', this)">Block</button>
                     ${this.lidarrEnabled ? `<button class="btn-refresh" style="margin-left:0.25rem;" onclick="ui.refreshInLidarr('${artist.mbid}', this)">Refresh in Lidarr</button>` : ''}
                 </td>
             `;
@@ -688,7 +1120,7 @@ const ui = {
             row.innerHTML = `
                 <td>
                     <span class="expand-icon" onclick="ui.toggleArtistExpand('${artist.mbid}')">▶</span>
-                    ${this.escapeHtml(artist.name)}
+                    ${this.escapeHtml(artist.name)}${this.catalogBadge(this.catalogStateOf(artist))}
                 </td>
                 <td><a href="https://musicbrainz.org/artist/${artist.mbid}" target="_blank" class="mbid-link" onclick="event.stopPropagation()" title="View on MusicBrainz">${artist.mbid.substring(0, 8)}...</a></td>
                 <td>${artist.type || '-'}</td>
@@ -699,6 +1131,8 @@ const ui = {
                 <td>${lastUpdated}</td>
                 <td>
                     <button class="btn-refresh" onclick="ui.refreshArtistMetadata('${artist.mbid}')">Fetch</button>
+                            <button class="btn-refresh danger" onclick="ui.clearMetadata('artist', '${artist.mbid}', this)">Clear</button>
+                            <button class="btn-refresh danger" onclick="ui.blockMetadata('artist', '${artist.mbid}', this)">Block</button>
                     ${this.lidarrEnabled ? `<button class="btn-refresh" style="margin-left:0.25rem;" onclick="ui.refreshInLidarr('${artist.mbid}', this)">Refresh in Lidarr</button>` : ''}
                 </td>
             `;
@@ -763,33 +1197,31 @@ const ui = {
 
     async saveMetadataSources() {
         try {
-            const config = { providers: {} };
+            // Flat dot-path keys so saving one provider's fields never replaces the whole
+            // providers section (which would drop the MusicBrainz sources list).
+            const updates = {};
 
-            // Collect all provider form values
             document.querySelectorAll('#metadataSourcesForm input, #metadataSourcesForm select').forEach(input => {
                 const path = input.id.split('.');
                 if (path[0] !== 'providers') return;
-                
-                const providerName = path[1];
-                const key = path[2];
-                
-                if (!config.providers[providerName]) {
-                    config.providers[providerName] = {};
-                }
-                
-                if (input.type === 'checkbox') {
-                    config.providers[providerName][key] = input.checked;
+                const key = `providers.${path[1]}.${path[2]}`;
+
+                if (input.disabled) {
+                    return;   // set by the environment: only compose changes it
+                } else if (path[2] === 'apiKey') {
+                    // A masked key is unchanged; an emptied field is sent empty, which deletes the key
+                    if (!input.value.endsWith('***')) updates[key] = input.value.trim();
+                } else if (input.type === 'checkbox') {
+                    updates[key] = input.checked;
                 } else if (input.type === 'number') {
-                    config.providers[providerName][key] = parseFloat(input.value);
-                } else {
+                    updates[key] = parseFloat(input.value);
+                } else if (input.value && !input.value.endsWith('***')) {
                     // Don't save masked values (contain ***)
-                    if (input.value && !input.value.endsWith('***') && input.value !== '') {
-                        config.providers[providerName][key] = input.value;
-                    }
+                    updates[key] = input.value;
                 }
             });
 
-            await api.updateConfig(config);
+            await api.updateConfig(updates);
             this.showSuccess('Metadata Changes Require Server Restart');
         } catch (error) {
             console.error('Failed to save metadata sources:', error);
@@ -894,24 +1326,218 @@ const ui = {
         try {
             const config = await api.getConfig();
             const li = config.lidarrIntegration || {};
-            document.getElementById('settings.lidarr.enabled').checked = !!li.enabled;
-            document.getElementById('settings.lidarr.url').value = li.url || '';
-            document.getElementById('settings.lidarr.apiKey').value = li.apiKey || '';
+            // No switch: it is on when it has a URL and a key; a value set in the environment wins and can only be changed there
+            const urlEl = document.getElementById('settings.lidarr.url');
+            const keyEl = document.getElementById('settings.lidarr.apiKey');
+            urlEl.value = li.url || '';
+            keyEl.value = li.apiKey || '';
+            urlEl.disabled = !!li.urlFromEnv;
+            keyEl.disabled = !!li.apiKeyFromEnv;
+            urlEl.title = li.urlFromEnv ? 'Set by LIDARR_URL in the environment (compose)' : '';
+            keyEl.title = li.apiKeyFromEnv ? 'Set by LIDARR_API_KEY in the environment (compose)' : '';
+            const stateEl = document.getElementById('lidarrState');
+            if (stateEl) {
+                const fromEnv = li.urlFromEnv || li.apiKeyFromEnv;
+                stateEl.textContent = (li.enabled
+                    ? 'On. Remove the URL or the API key and restart the server to turn it off.'
+                    : 'Off. Enter a URL and an API key and restart the server to turn it on.')
+                    + (fromEnv ? ' Fields set in the environment can only be changed in the compose file.' : '');
+            }
             const levelEl = document.getElementById('settings.logLevel');
             if (levelEl) levelEl.value = config.server?.logLevel || 'info';
+            const ttlEl = document.getElementById('settings.metadata.ttlDays');
+            if (ttlEl) ttlEl.value = (config.metadata && config.metadata.ttlDays) || 30;
+            this.loadBlocklist();
+            this.loadWs2Keys();
         } catch (e) {
             console.error('Failed to load settings:', e);
         }
     },
 
+    async saveRetention() {
+        try {
+            const days = parseInt(document.getElementById('settings.metadata.ttlDays').value, 10);
+            if (!Number.isInteger(days) || days < 1) {
+                this.showError('TTL must be a whole number of days ≥ 1');
+                return;
+            }
+            // Dot-path key so we set metadata.ttlDays without clobbering the rest of metadata.
+            await api.updateConfig({ 'metadata.ttlDays': days });
+            this.showSuccess(`Metadata TTL set to ${days} days`);
+        } catch (e) {
+            this.showError('Failed to save retention setting');
+        }
+    },
+
+    // ─── Clearing and blocking metadata ───────────────────────────────────────────────
+
+    // The name on the row a button sits in (artist and album rows keep it in their first cell)
+    _rowName(btn) {
+        const cell = btn && btn.closest('tr') && btn.closest('tr').querySelector('td');
+        return cell ? cell.textContent.replace(/[▶▼]/g, '').replace(/\s+/g, ' ').trim() : '';
+    },
+
+    _describeRemoval(s) {
+        const parts = [];
+        if (s.release_groups) parts.push(`${s.release_groups} album${s.release_groups === 1 ? '' : 's'}`);
+        if (s.releases) parts.push(`${s.releases} release${s.releases === 1 ? '' : 's'}`);
+        if (s.tracks) parts.push(`${s.tracks} track${s.tracks === 1 ? '' : 's'}`);
+        if (s.images) parts.push(`${s.images} image${s.images === 1 ? '' : 's'}`);
+        return parts.length ? parts.join(', ') : 'nothing else';
+    },
+
+    async _removeRequest(url, options) {
+        const response = await fetch(url, options);
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || data.success === false) throw new Error(data.error || `HTTP ${response.status}`);
+        return data;
+    },
+
+    // Disables the button and shows what it is doing until `work` settles, then restores it
+    async _busy(btn, label, work) {
+        if (!btn) return work();
+        const original = btn.innerHTML;
+        btn.disabled = true;
+        btn.innerHTML = `<span class="spinner"></span>${label}`;
+        try { return await work(); } finally { btn.disabled = false; btn.innerHTML = original; }
+    },
+
+    async clearMetadata(type, mbid, btn) {
+        const name = this._rowName(btn) || mbid;
+        try {
+            const preview = await this._busy(btn, 'Counting…', () => this._removeRequest(`/api/metadata/clear-preview/${type}/${mbid}`));
+            const kind = type === 'artist' ? 'artist' : 'album';
+            let msg = `Clear the stored metadata of ${kind} "${name}"?\n\nThis removes ${this._describeRemoval(preview)}` + (type === 'artist' ? ' (images you uploaded included)' : '') + '.';
+            if (type === 'artist' && preview.artists_kept) msg += `\n\nThe artist's name stays, because an album that remains credits it; its catalog is removed.`;
+            if (preview.lidarr === 'in') msg += `\n\nIt IS in Lidarr's library: its albums come back at the next Lidarr request, and Lidarr may briefly see none.`;
+            msg += '\n\nIt is fetched again the next time it is requested. To stop that, use Block.';
+            if (!confirm(msg)) return;
+            const r = await this._busy(btn, 'Clearing…', () => this._removeRequest(`/api/metadata/${type === 'artist' ? 'artist' : 'album'}/${mbid}`, { method: 'DELETE' }));
+            this.showSuccess(`Cleared ${name}: ${this._describeRemoval(r)}`);
+            this.loadMetadataTree();
+        } catch (e) {
+            this.showError(`Clear failed: ${e.message}`);
+        }
+    },
+
+    async blockMetadata(type, mbid, btn) {
+        const name = this._rowName(btn) || mbid;
+        try {
+            const preview = await this._busy(btn, 'Counting…', () => this._removeRequest(`/api/metadata/clear-preview/${type}/${mbid}`));
+            if (preview.lidarr === 'in') { this.showError(`"${name}" is in Lidarr's library: remove it from Lidarr first`); return; }
+            if (preview.lidarr === 'unknown') { this.showError('Lidarr cannot confirm whether this is in its library right now: nothing blocked'); return; }
+            const msg = `Block ${type === 'artist' ? 'artist' : 'album'} "${name}"?\n\nnuLMD will never fetch or store it again, and its stored metadata is removed now (${this._describeRemoval(preview)}). Lidarr is sent ` + (type === 'artist' ? 'no albums for it' : 'a 404 for it') + '. You can unblock it in Settings.';
+            if (!confirm(msg)) return;
+            const r = await this._busy(btn, 'Blocking…', () => this._removeRequest('/api/blocklist', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ type, mbid, name })
+            }));
+            this.showSuccess(`Blocked ${name}` + (r.cleared ? `: ${this._describeRemoval(r.cleared)} removed` : ''));
+            this.loadMetadataTree();
+        } catch (e) {
+            this.showError(`Block failed: ${e.message}`);
+        }
+    },
+
+    async pruneMetadataNotInLidarr(btn) {
+        try {
+            const post = dryRun => this._removeRequest('/api/metadata/prune-not-in-lidarr', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dryRun })
+            });
+            const preview = await this._busy(btn, 'Counting…', () => post(true));
+            if (!preview.artists) { this.showSuccess('Nothing to trim: every stored artist is in Lidarr'); return; }
+            let msg = `Delete the stored metadata of ${preview.artists - preview.artists_kept} artist(s) that are not in Lidarr?\n\nThis removes ${this._describeRemoval(preview)}.`;
+            if (preview.artists_kept) msg += `\n${preview.artists_kept} more artist(s) keep their name only (an album in Lidarr credits them) and lose their catalog.`;
+            msg += `\n\nArtists and albums in Lidarr are kept. Anything requested again later (by Lidarr or a /ws/2 client) is fetched again.`;
+            if (!confirm(msg)) return;
+            this.showSuccess('Trimming… this can take a few minutes on a large library');
+            const r = await this._busy(btn, 'Trimming…', () => post(false));
+            this.showSuccess(`Removed ${this._describeRemoval(r)} of ${r.artists} artists (${(r.bytes / (1024 * 1024)).toFixed(1)} MB of images)`);
+        } catch (e) {
+            this.showError(`Trim failed: ${e.message}`);
+        }
+    },
+
+    async loadBlocklist() {
+        const box = document.getElementById('blocklistList');
+        if (!box) return;
+        try {
+            const data = await (await fetch('/api/blocklist')).json();
+            const rows = [...data.builtin, ...data.entries];
+            box.innerHTML = rows.map(e => `
+                <div class="blocklist-row">
+                    <span class="blocklist-kind">${this.escapeHtml(e.entity_type.replace('_', ' '))}</span>
+                    <span class="blocklist-name">${this.escapeHtml(e.name || '')}${e.builtin ? ' <em>(built in)</em>' : ''}</span>
+                    <span class="blocklist-mbid">${this.escapeHtml(e.mbid)}</span>
+                    ${e.builtin ? '' : `<button class="btn btn-secondary btn-sm" onclick="ui.unblock('${e.entity_type}', '${e.mbid}')">Unblock</button>`}
+                </div>`).join('') || 'Nothing blocked';
+        } catch (e) {
+            box.textContent = 'Failed to load the blocklist';
+        }
+    },
+
+    async addBlock(btn) {
+        const type = document.getElementById('blockType').value;
+        const mbid = document.getElementById('blockMbid').value.trim().toLowerCase();
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(mbid)) { this.showError('Enter a valid MusicBrainz ID'); return; }
+        if (!confirm(`Block this ${type.replace('_', ' ')} and remove what nuLMD holds for it?\n\n${mbid}`)) return;
+        try {
+            const r = await this._busy(btn, 'Blocking…', () => this._removeRequest('/api/blocklist', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type, mbid })
+            }));
+            this.showSuccess('Blocked' + (r.cleared ? `: ${this._describeRemoval(r.cleared)} removed` : ''));
+            document.getElementById('blockMbid').value = '';
+            this.loadBlocklist();
+        } catch (e) {
+            this.showError(`Block failed: ${e.message}`);
+        }
+    },
+
+    async unblock(type, mbid) {
+        try {
+            await this._removeRequest(`/api/blocklist/${type}/${mbid}`, { method: 'DELETE' });
+            this.showSuccess('Unblocked: it is fetched again only when it is next requested');
+            this.loadBlocklist();
+        } catch (e) {
+            this.showError(`Unblock failed: ${e.message}`);
+        }
+    },
+
+    async pruneImagesNotInLidarr(btn) {
+        if (!confirm('Delete locally-cached images for artists/albums no longer in Lidarr?\n\nImages for artists still in Lidarr are kept (including your uploads). If an artist has left Lidarr, all its images are removed. Trimmed images will re-download if Lidarr requests them again.')) return;
+        try {
+            const data = await this._busy(btn, 'Trimming…', async () => {
+                const response = await fetch('/api/images/prune-not-in-lidarr', { method: 'POST' });
+                return response.json();
+            });
+            if (!data.success) {
+                this.showError(data.error || 'Trim failed');
+                return;
+            }
+            const mb = (data.bytesFreed / (1024 * 1024)).toFixed(1);
+            let msg = `Removed ${data.deleted} images (${data.artists} artist, ${data.albums} album) — freed ${mb} MB`;
+            if (!data.albumTrimEnabled) msg += ' (Lidarr album list unavailable — album art left untouched)';
+            this.showSuccess(msg);
+        } catch (e) {
+            this.showError('Failed to trim images');
+        }
+    },
+
+    // What the Lidarr fields change, as flat dot-path keys so a save sends only what the user can change: a field set in the
+    // environment is skipped, a masked key (unchanged) is skipped, and an emptied field is sent empty, which deletes it
+    _lidarrUpdates() {
+        const urlEl = document.getElementById('settings.lidarr.url');
+        const keyEl = document.getElementById('settings.lidarr.apiKey');
+        const updates = {};
+        if (!urlEl.disabled) updates['lidarrIntegration.url'] = urlEl.value.trim();
+        if (!keyEl.disabled && !keyEl.value.endsWith('***')) updates['lidarrIntegration.apiKey'] = keyEl.value.trim();
+        return updates;
+    },
+
     async saveSettings() {
         try {
-            const url = document.getElementById('settings.lidarr.url').value;
-            const apiKey = document.getElementById('settings.lidarr.apiKey').value;
-            const enabled = document.getElementById('settings.lidarr.enabled').checked;
-            const config = { lidarrIntegration: { enabled, url } };
-            if (apiKey && !apiKey.endsWith('***')) config.lidarrIntegration.apiKey = apiKey;
-            await api.updateConfig(config);
+            const updates = this._lidarrUpdates();
+            if (Object.keys(updates).length) await api.updateConfig(updates);
             this.showSuccess('Settings saved — restart server to apply');
         } catch (e) {
             this.showError('Failed to save settings');
@@ -947,7 +1573,6 @@ const ui = {
         try {
             const url = document.getElementById('settings.lidarr.url')?.value || '';
             const apiKey = document.getElementById('settings.lidarr.apiKey')?.value || '';
-            const enabled = document.getElementById('settings.lidarr.enabled')?.checked || false;
 
             if (!url || !apiKey) {
                 resultEl.textContent = '✘ URL and API key required';
@@ -956,9 +1581,8 @@ const ui = {
             }
 
             // Save config first so the server has the latest values
-            const saveConfig = { lidarrIntegration: { enabled, url } };
-            if (!apiKey.endsWith('***')) saveConfig.lidarrIntegration.apiKey = apiKey;
-            await api.updateConfig(saveConfig);
+            const updates = this._lidarrUpdates();
+            if (Object.keys(updates).length) await api.updateConfig(updates);
 
             const response = await fetch('/api/lidarr/test', { method: 'POST' });
             const result = await response.json();
@@ -1383,6 +2007,40 @@ const ui = {
         }
     },
 
+    // Where an artist's catalog stands. Checked ones need no mark; the others say why they differ
+    catalogStateOf(artist) {
+        if (artist.catalog_provisional) return 'provisional';
+        if (artist.catalog_verified_at) return 'verified';
+        return artist.catalog_complete_at ? 'unverified' : 'incomplete';
+    },
+
+    catalogBadge(state) {
+        const marks = {
+            provisional: ['provisional', 'Taken from an upstream while MusicBrainz was down. Replaced by the checked copy as soon as MusicBrainz answers.'],
+            unverified:  ['older', 'Stored before catalogs were checked against MusicBrainz. Renewed when its TTL runs out.'],
+            incomplete:  ['incomplete', 'The catalog has not been fetched yet.']
+        };
+        const mark = marks[state];
+        return mark ? ` <span class="catalog-badge catalog-${state}" title="${mark[1]}">${mark[0]}</span>` : '';
+    },
+
+    // "retry in 2m" for a job waiting out a pause after a failure
+    // Why a catalog job was queued (job metadata `via`), for the job row
+    jobOrigin(job) {
+        const via = job.via || '';
+        if (!via) return '';
+        if (via.startsWith('album-credit:')) return 'via an album credit';
+        return { 'artist-request': 'via an artist request', 'provisional-sweep': 'via the provisional sweep', manual: 'started by hand' }[via] || '';
+    },
+
+    retryNote(job) {
+        if (job.status !== 'pending' || !job.run_after) return '';
+        const seconds = Math.round((new Date(job.run_after) - Date.now()) / 1000);
+        if (seconds <= 0) return '';
+        const wait = seconds >= 90 ? `${Math.round(seconds / 60)}m` : `${seconds}s`;
+        return `retry in ${wait}`;
+    },
+
     async refreshJobsCard() {
         try {
             const response = await fetch('/api/jobs/recent?type=metadata');
@@ -1430,8 +2088,15 @@ const ui = {
                             ${albumCount   > 0 ? `<span>${albumCount} albums</span>` : ''}
                             ${releaseCount > 0 ? `<span>${releaseCount} releases</span>` : ''}
                             ${trackCount   > 0 ? `<span>${trackCount} tracks</span>` : ''}
+                            ${this.jobOrigin(job) ? `<span title="What queued this job">${this.jobOrigin(job)}</span>` : ''}
                         </div>` : '';
                 }
+
+                const retry = this.retryNote(job);
+                const attemptNote = job.attempts > 1 && !isDone ? `attempt ${job.attempts}/${job.max_attempts}` : '';
+                const notes = [retry, attemptNote].filter(Boolean).join(' · ');
+                const errorTitle = job.error_message && !isDone ? ` title="${this.escapeHtml(job.error_message)}"` : '';
+                const catalogBadge = job.job_type === 'fetch_artist_albums' ? this.catalogBadge(job.catalog_state) : '';
 
                 const artistPrefix = job.artist_name
                     ? `<span class="job-artist-name">${this.escapeHtml(job.artist_name)}</span> — `
@@ -1441,8 +2106,8 @@ const ui = {
                     <div class="job-row">
                         <div class="job-row-header">
                             <span class="job-time">${new Date(job.created_at).toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + new Date(job.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
-                            <span class="job-label">${artistPrefix}${this.escapeHtml(displayName)} <span class="job-type-badge">${label}</span></span>
-                            <span class="job-status job-status-${job.status}">${job.status}</span>
+                            <span class="job-label">${artistPrefix}${this.escapeHtml(displayName)} <span class="job-type-badge">${label}</span>${catalogBadge}</span>
+                            <span class="job-status job-status-${job.status}"${errorTitle}>${notes ? `${notes} · ` : ''}${job.status}</span>
                         </div>
                         <div class="job-bar-track">
                             <div class="job-bar ${barClass} ${isProcessing ? 'job-bar-animated' : ''}" style="width: ${fillPct}"></div>
@@ -1512,51 +2177,130 @@ const ui = {
         }
     },
 
+    // Who made an inbound request, as a small tag: the name, and the address it came from
+    describeClient(e) {
+        if (!e.clientName && !e.clientIp) return '<span class="conn-peer conn-lidarr">Lidarr</span>';
+        const name = this.escapeHtml(e.clientName || 'unknown');
+        const ip = e.clientIp ? this.escapeHtml(e.clientIp) : '';
+        const cls = /^lidarr$/i.test(e.clientName || '') ? 'conn-lidarr' : 'conn-client';
+        return `<span class="conn-peer ${cls}" title="${ip}">${name}${ip ? ` <span class="conn-ip">${ip}</span>` : ''}</span>`;
+    },
+
+    // Two cards from one feed: Requests (who asked nuLMD, and for what) and Responses (what nuLMD sent back, how it made it,
+    // and which sources it called to do so). They list the same requests in the same order.
     async refreshConnectionsCard() {
         try {
-            const response = await fetch('/api/requests/recent');
-            const entries = await response.json();
-            const container = document.getElementById('connectionsCard');
-            if (!container) return;
-
-            if (entries.length === 0) {
-                container.innerHTML = '<div class="conn-empty">No connections yet</div>';
-                return;
-            }
-
-            container.innerHTML = entries.map(e => {
-                const isInbound  = e.direction === 'inbound';
-                const time = new Date(e.timestamp).toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + new Date(e.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-                const statusClass = e.status === 'error'  ? 'conn-status-error'
-                                  : e.status === 'cached' ? 'conn-status-cached'
-                                  : 'conn-status-ok';
-                const arrow     = isInbound ? '&rarr;' : '&larr;';
-                const outboundClass = {
-                    'MusicBrainz':    'conn-mb',
-                    'Wikipedia':      'conn-wikipedia',
-                    'CoverArtArchive':'conn-caa',
-                    'Fanart':         'conn-fanart',
-                    'Deezer':         'conn-deezer'
-                }[e.label] || 'conn-mb';
-                const fromLabel = isInbound
-                    ? '<span class="conn-peer conn-lidarr">Lidarr</span>'
-                    : '<span class="conn-peer conn-nuLMD">nuLMD</span>';
-                const toLabel   = isInbound
-                    ? '<span class="conn-peer conn-nuLMD">nuLMD</span>'
-                    : `<span class="conn-peer ${outboundClass}">${this.escapeHtml(e.label)}</span>`;
-
-                return `
-                    <div class="conn-row ${isInbound ? 'conn-inbound' : 'conn-outbound'}">
-                        <span class="conn-time">${time}</span>
-                        <span class="conn-direction">${fromLabel} <span class="conn-arrow">${arrow}</span> ${toLabel}</span>
-                        <span class="conn-label">${this.escapeHtml(e.label)}</span>
-                        <span class="conn-detail">${this.escapeHtml(e.detail)}</span>
-                        <span class="conn-dot ${statusClass}"></span>
-                    </div>`;
-            }).join('');
+            const requests = await fetch('/api/requests/recent?direction=inbound').then(r => r.json());
+            const fill = (id, empty, rowFn) => {
+                const container = document.getElementById(id);
+                if (container) container.innerHTML = requests.length === 0 ? `<div class="conn-empty">${empty}</div>` : requests.map(rowFn).join('');
+            };
+            fill('connectionsCard', 'No requests yet', e => this.requestRow(e));
+            fill('responsesCard', 'No responses yet', e => this.responseRow(e));
         } catch (error) {
             console.error('Failed to refresh connections:', error);
         }
+    },
+
+    connTime(e) {
+        const at = new Date(e.timestamp);
+        return at.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    },
+
+    connStatusClass(e) {
+        return e.status === 'error' ? 'conn-status-error'
+             : e.status === 'cached' ? 'conn-status-cached'
+             : e.status === 'pending' ? 'conn-status-pending'
+             : 'conn-status-ok';
+    },
+
+    formatDuration(ms) {
+        if (ms === null || ms === undefined) return '';
+        return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`;
+    },
+
+    // The colour of a source's name: MusicBrainz and LMD servers are named "MusicBrainz(label)" / "LMD(label)"
+    sourceClass(label) {
+        const name = String(label || '');
+        if (/^MusicBrainz/i.test(name)) return 'conn-mb';
+        if (/^LMD/i.test(name))         return 'conn-api-lmd';
+        if (/^Wikipedia/i.test(name))   return 'conn-wikipedia';
+        if (/^CoverArtArchive/i.test(name)) return 'conn-caa';
+        if (/^Fanart/i.test(name))      return 'conn-fanart';
+        if (/^Deezer/i.test(name))      return 'conn-deezer';
+        return 'conn-client';
+    },
+
+    // One image file handed to Lidarr (inside an Image Fetch request)
+    callRow(call) {
+        const times = call.count > 1 ? ` <span class="conn-ip">&times;${call.count}</span>` : '';
+        const result = [call.outcome, this.formatDuration(call.durationMs)].filter(Boolean).join(' · ');
+        return `
+            <div class="conn-call">
+                <span class="conn-peer ${this.sourceClass(call.label)}">${this.escapeHtml(call.label)}</span>
+                <span class="conn-detail" title="${this.escapeHtml(call.detail)}">${this.escapeHtml(call.detail)}${times}</span>
+                <span class="conn-call-result ${call.status === 'error' ? 'conn-text-error' : ''}">${this.escapeHtml(result)}</span>
+                <span class="conn-dot ${this.connStatusClass(call)}"></span>
+            </div>`;
+    },
+
+    // Image bursts keep their file list folded away; the dashboard redraws on every poll, so which are open is remembered
+    toggleBurst(id, open) {
+        this.openBursts = this.openBursts || new Set();
+        if (open) this.openBursts.add(id); else this.openBursts.delete(id);
+    },
+
+    apiBadge(e) {
+        const api = e.api || 'LMD';
+        return `<span class="conn-peer ${api === 'MB' ? 'conn-api-mb' : 'conn-api-lmd'}" title="${api === 'MB' ? 'MusicBrainz API (/ws/2)' : 'Lidarr metadata API'}">${api}</span>`;
+    },
+
+    // One request: who asked and what for. An image fetch lists its files, folded away.
+    requestRow(e) {
+        const calls = Array.isArray(e.calls) ? e.calls : [];
+        const files = e.label === 'Image Fetch' && calls.length
+            ? `<details class="conn-files" ${this.openBursts && this.openBursts.has(e.id) ? 'open' : ''} ontoggle="ui.toggleBurst(${Number(e.id)}, this.open)"><summary>files (${calls.length + (e.callsMore || 0)})</summary>${calls.map(c => this.callRow(c)).join('')}${e.callsMore ? `<div class="conn-call conn-call-more">+${e.callsMore} more</div>` : ''}</details>`
+            : '';
+        return `
+            <div class="conn-request">
+                <div class="conn-row conn-inbound">
+                    <span class="conn-time">${this.connTime(e)}</span>
+                    <span class="conn-direction">${this.describeClient(e)} <span class="conn-arrow">&rarr;</span> <span class="conn-peer conn-nuLMD">nuLMD</span> ${this.apiBadge(e)}</span>
+                    <span class="conn-label">${this.escapeHtml(e.label)}</span>
+                    <span class="conn-detail">${this.escapeHtml(e.detail)}</span>
+                    <span class="conn-dot ${this.connStatusClass(e)}"></span>
+                </div>
+                ${files}
+            </div>`;
+    },
+
+    // What nuLMD sent back for a request: the content of the reply, how it was made, how long it took, and the sources it
+    // called to make it (each with its own result and time). Rows saved before replies were recorded say only answered/error.
+    responseRow(e) {
+        const isError = e.status === 'error';
+        const how = [e.outcome, this.formatDuration(e.durationMs)].filter(Boolean).join(' · ');
+        const content = e.reply || (isError ? '' : (e.outcome ? '' : 'answered'));
+        const calls = e.label === 'Image Fetch' || !Array.isArray(e.calls) ? [] : e.calls;
+        const shown = calls.slice(0, 3).map(c => {
+            const result = [c.outcome, this.formatDuration(c.durationMs)].filter(Boolean).join(' · ');
+            return `<span class="conn-chip ${this.sourceClass(c.label)} ${c.status === 'error' ? 'conn-chip-error' : ''}" title="${this.escapeHtml(c.detail)}">${this.escapeHtml(c.label)}${result ? ' ' + this.escapeHtml(result) : ''}</span>`;
+        }).join(' ');
+        const extra = calls.length ? Math.max(0, calls.length - 3) + (e.callsMore || 0) : 0;
+        return `
+            <div class="conn-response">
+                <div class="conn-row conn-outbound">
+                    <span class="conn-time">${this.connTime(e)}</span>
+                    <span class="conn-direction"><span class="conn-peer conn-nuLMD">nuLMD</span> <span class="conn-arrow">&rarr;</span> ${this.describeClient(e)}</span>
+                    <span class="conn-label">${this.escapeHtml(e.label)}</span>
+                    <span class="conn-detail">${this.escapeHtml(e.detail)}</span>
+                </div>
+                <div class="conn-reply-body">
+                    ${content ? `<span class="conn-reply-content">${this.escapeHtml(content)}</span>` : ''}
+                    ${how ? `<span class="conn-reply-how ${isError ? 'conn-text-error' : ''}">${this.escapeHtml(how)}</span>` : ''}
+                    ${shown}${extra > 0 ? ` <span class="conn-chip conn-client">+${extra}</span>` : ''}
+                    <span class="conn-dot ${this.connStatusClass(e)}"></span>
+                </div>
+            </div>`;
     },
 
     async clearDownloadQueue() {
@@ -1649,6 +2393,7 @@ const ui = {
             if (document.getElementById('dashboard-tab').classList.contains('active')) {
                 await this.refreshJobsCard();
                 await this.refreshDownloadJobsCard();
+                await this.refreshSourcesStrip();
             }
             const interval = this.jobsHasActive ? 1000 : 5000;
             this.jobsRefreshTimeout = setTimeout(pollJobs, interval);

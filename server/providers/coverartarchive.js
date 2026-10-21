@@ -10,7 +10,7 @@ class CoverArtArchiveProvider extends BaseProvider {
       baseUrl: 'https://coverartarchive.org',
       rateLimit: {
         requests: 1,
-        period: 2500  // 1 request per 2.5 seconds (30 req/min limit)
+        period: Number(config && config.rateLimitMs) || 1000  // ms between requests; the archive documents no limit, so one a second
       }
     };
     
@@ -56,6 +56,16 @@ class CoverArtArchiveProvider extends BaseProvider {
     }, 7 * 24 * 60 * 60); // Cache for 7 days
   }
 
+  /**
+   * The front cover of a release group, without asking the archive anything: its own address for the group's front image
+   * (it redirects to the file). Only for a group MusicBrainz says has a front image; a group without one answers 404.
+   * @param {string} mbid - MusicBrainz release group ID
+   * @returns {Array} - one image object with {CoverType, Url, Provider}
+   */
+  directCover(mbid) {
+    return [{ CoverType: 'Cover', Url: `https://coverartarchive.org/release-group/${mbid}/front`, Provider: 'coverartarchive' }];
+  }
+
   extractImages(images) {
     const extracted = [];
     
@@ -64,7 +74,11 @@ class CoverArtArchiveProvider extends BaseProvider {
     for (const image of images) {
       const types = image.types || [];
       const url = image.image; // Full resolution image URL
-      
+
+      // Cover Art Archive occasionally returns an entry with no usable image
+      // URL — skip it rather than emitting a blank-URL cover.
+      if (!url) continue;
+
       // Map Cover Art Archive types to Lidarr CoverType
       if (types.includes('Front')) {
         extracted.push({

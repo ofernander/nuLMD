@@ -13,7 +13,7 @@ class Config {
     try {
       const configFile = await fs.readFile(this.configPath, 'utf8');
       this.config = yaml.load(configFile);
-      logger.info('Configuration loaded from:', this.configPath);
+      logger.info(`Configuration loaded from: ${this.configPath}`);
       return this.config;
     } catch (error) {
       if (error.code === 'ENOENT') {
@@ -39,15 +39,11 @@ class Config {
         user: process.env.POSTGRES_USER || 'nulmd',
         password: process.env.POSTGRES_PASSWORD || 'changeme'
       },
-      cache: {
-        enabled: process.env.CACHE_ENABLED !== 'false', // Default true unless explicitly disabled
-        ttl: parseInt(process.env.CACHE_TTL) || 3600, // 1 hour in seconds
-        maxSize: parseInt(process.env.CACHE_MAX_SIZE) || 1000
-      },
       providers: {
         musicbrainz: {
           enabled: true,
-          baseUrl: '' // Empty = use default, or set custom MusicBrainz server URL
+          baseUrl: '', // Empty = use default, or set custom MusicBrainz server URL
+          sources: []  // Extra MusicBrainz sources: [{ url, priority, rateLimitMs, maxConcurrent, enabled }]
         },
         wikipedia: {
           enabled: true  // No API key needed!
@@ -56,8 +52,7 @@ class Config {
           enabled: true  // Album covers from MusicBrainz/Internet Archive
         },
         fanart: {
-          enabled: !!process.env.FANART_API_KEY,  // Auto-enable if API key in environment
-          apiKey: process.env.FANART_API_KEY || ''  // Get free key from https://fanart.tv/get-an-api-key/
+          apiKey: ''  // On when there is a key (FANART_API_KEY in the environment wins). Get a free key from https://fanart.tv/get-an-api-key/
         },
         deezer: {
           enabled: true  // Free, no API key needed
@@ -75,16 +70,24 @@ class Config {
         compatibilityMode: 'plugin', // or 'legacy'
         metadataProfile: 'default'
       },
-      lidarrIntegration: {
-        enabled: !!(process.env.LIDARR_URL && process.env.LIDARR_API_KEY),
-        url: process.env.LIDARR_URL || '',
-        apiKey: process.env.LIDARR_API_KEY || ''
+      lidarrIntegration: {   // On when there is a URL and a key (LIDARR_URL and LIDARR_API_KEY in the environment win)
+        url: '',
+        apiKey: ''
+      },
+      ws2: {
+        enabled: process.env.WS2_ENABLED !== 'false', // MusicBrainz-compatible API at /ws/2
+        apiKey: process.env.WS2_API_KEY || '',          // Empty = open. Set to require it (X-API-Key, Bearer token or ?apikey=)
+        proxyTtlHours: 24,                              // How long a passed-through MusicBrainz reply is reused
+        searchTtlHours: 24,                             // How long a search result is reused (also Lidarr's own search hits)
+        emptySearchTtlMinutes: 15,                      // How long a search that found nothing is reused (never longer than the above)
+        negativeTtlMinutes: 10                          // How long a "not found" / "needs an account" from MusicBrainz is remembered (0 = off)
+      },
+      logs: {
+        requestLogDays: 30     // The request log (the dashboard's Requests and Responses history) keeps this many days; 0 = keep everything
       },
       metadata: {
-        fetchTypes: {
-          albumTypes: ['Studio', 'EP', 'Single'], // Which release types to fetch — mirrors Metadata Browser filter
-          releaseStatuses: ['Official'] // Release status filter — empty = no status filter
-        }
+        ttlDays: 30,           // Days before cached artist/album metadata is stale and re-fetched from MusicBrainz
+        fullRefreshDays: 180,  // At the TTL an artist whose release and release group counts are unchanged only has its TTL renewed (2 requests); its whole catalog is fetched again this often regardless
       }
     };
 
@@ -101,7 +104,7 @@ class Config {
       'utf8'
     );
     
-    logger.info('Default configuration created at:', this.configPath);
+    logger.info(`Default configuration created at: ${this.configPath}`);
   }
 
   async save() {
@@ -132,6 +135,22 @@ class Config {
     }
     
     return value;
+  }
+
+  // Fanart and the Lidarr integration have no switch: each is on exactly when it has what it needs, and a value from the
+  // environment (compose) beats the one saved in config.yml, field by field. To turn one off, remove its key.
+  fanartSettings() {
+    const fromEnv = String(process.env.FANART_API_KEY || '').trim();
+    const apiKey = fromEnv || String(this.get('providers.fanart.apiKey', '') || '').trim();
+    return { apiKey, enabled: !!apiKey, apiKeyFromEnv: !!fromEnv };
+  }
+
+  lidarrSettings() {
+    const envUrl = String(process.env.LIDARR_URL || '').trim();
+    const envKey = String(process.env.LIDARR_API_KEY || '').trim();
+    const url = envUrl || String(this.get('lidarrIntegration.url', '') || '').trim();
+    const apiKey = envKey || String(this.get('lidarrIntegration.apiKey', '') || '').trim();
+    return { url, apiKey, enabled: !!(url && apiKey), urlFromEnv: !!envUrl, apiKeyFromEnv: !!envKey };
   }
 
   set(key, value) {

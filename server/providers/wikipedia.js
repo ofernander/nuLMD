@@ -1,6 +1,14 @@
 const BaseProvider = require('./base');
 const { logger } = require('../lib/logger');
 
+// Lookups asked for within a short window go out as ONE request: Wikidata answers up to 50 ids per call and the
+// extracts API up to 20 pages per call, so a catalog's worth of overviews needs a handful of calls instead of two each.
+const BATCH_WINDOW_MS = 150;
+const WIKIDATA_BATCH = 50;
+const EXTRACT_BATCH = 20;
+// A failed overview lookup is retried a few times here, then the job fails (and the queue retries it after a pause)
+const RETRIES = { maxRetries: 3, backoffMs: 2000 };
+
 class WikipediaProvider extends BaseProvider {
   constructor(config) {
     const providerConfig = {
@@ -13,6 +21,37 @@ class WikipediaProvider extends BaseProvider {
     };
     
     super('Wikipedia', providerConfig);
+    this._batches = {};
+  }
+
+  /**
+   * Collect the keys asked for within BATCH_WINDOW_MS (or until `max` are waiting) and answer them all with one call to
+   * `fetchMany(keys)`, which returns a Map key -> value. The same key asked twice shares one answer; if the call fails,
+   * every waiter gets the error (a failed lookup must never look like "nothing found").
+   */
+  _coalesce(kind, key, max, fetchMany) {
+    const batch = this._batches[kind] || (this._batches[kind] = { waiting: new Map(), timer: null });
+    let entry = batch.waiting.get(key);
+    if (!entry) {
+      entry = { waiters: [] };
+      batch.waiting.set(key, entry);
+    }
+    const promise = new Promise((resolve, reject) => entry.waiters.push({ resolve, reject }));
+
+    const flush = () => {
+      clearTimeout(batch.timer);
+      batch.timer = null;
+      const taken = batch.waiting;
+      batch.waiting = new Map();
+      const keys = [...taken.keys()];
+      fetchMany(keys).then(
+        answers => { for (const [k, e] of taken) for (const w of e.waiters) w.resolve(answers.has(k) ? answers.get(k) : null); },
+        error => { for (const e of taken.values()) for (const w of e.waiters) w.reject(error); }
+      );
+    };
+    if (batch.waiting.size >= max) flush();
+    else if (!batch.timer) batch.timer = setTimeout(flush, BATCH_WINDOW_MS);
+    return promise;
   }
 
   async initialize() {
@@ -79,42 +118,41 @@ class WikipediaProvider extends BaseProvider {
       
       // Fetch the intro text
       return await this.getPageIntro(pageTitle);
-    }, 7 * 24 * 60 * 60); // Cache for 7 days (bios don't change often)
+    }, 7 * 24 * 60 * 60, RETRIES); // Cache for 7 days (bios don't change often)
   }
 
   /**
-   * Get Wikipedia page title from Wikidata ID
+   * Get Wikipedia page title from Wikidata ID. Lookups asked for close together share one Wikidata call.
+   * null = Wikidata has no English Wikipedia page for it; a failed request throws (it is not an answer).
    * @param {string} wikidataId - Wikidata ID (e.g., "Q224483")
    * @returns {Promise<string|null>}
    */
   async getPageTitleFromWikidata(wikidataId) {
-    try {
-      logger.debug(`Wikipedia: Looking up page title for Wikidata ${wikidataId}`);
-      
-      // Query Wikidata for the English Wikipedia page
-      const response = await this.client.get('', {
-        params: {
-          action: 'wbgetentities',
-          ids: wikidataId,
-          props: 'sitelinks',
-          sitefilter: 'enwiki',
-          format: 'json'
-        },
-        baseURL: 'https://www.wikidata.org/w/api.php'
-      });
-      
-      const entity = response.data.entities[wikidataId];
-      if (entity && entity.sitelinks && entity.sitelinks.enwiki) {
-        const title = entity.sitelinks.enwiki.title;
-        logger.debug(`Wikipedia: Found page title "${title}" for ${wikidataId}`);
-        return title;
-      }
-      
-      return null;
-    } catch (error) {
-      logger.error(`Wikipedia: Failed to get page title from Wikidata ${wikidataId}:`, error.message);
-      return null;
+    return this._coalesce('wikidata', wikidataId, WIKIDATA_BATCH, ids => this._fetchPageTitles(ids));
+  }
+
+  async _fetchPageTitles(ids) {
+    logger.debug(`Wikipedia: Looking up page titles for ${ids.length} Wikidata id(s)`);
+    const response = await this.client.get('', {
+      params: {
+        action: 'wbgetentities',
+        ids: ids.join('|'),
+        props: 'sitelinks',
+        sitefilter: 'enwiki',
+        format: 'json'
+      },
+      baseURL: 'https://www.wikidata.org/w/api.php'
+    });
+
+    const titles = new Map();
+    for (const entity of Object.values(response.data.entities || {})) {
+      const title = entity && entity.sitelinks && entity.sitelinks.enwiki && entity.sitelinks.enwiki.title;
+      if (!title) continue;
+      titles.set(entity.id, title);
+      // an id that was merged into another comes back under the id it points to
+      if (entity.redirects && entity.redirects.from) titles.set(entity.redirects.from, title);
     }
+    return titles;
   }
 
   /**
@@ -163,100 +201,123 @@ class WikipediaProvider extends BaseProvider {
       return titles[0];
     } catch (error) {
       logger.error(`Wikipedia: Failed to search for "${artistName}":`, error.message);
-      return null;
+      throw error;
     }
   }
 
   /**
-   * Get the intro/summary section of a Wikipedia page
+   * Get the intro/summary section of a Wikipedia page. Lookups asked for close together share one call (20 pages each).
+   * null = the page is missing, a disambiguation page or empty; a failed request throws.
    * @param {string} pageTitle - Wikipedia page title
    * @returns {Promise<string|null>}
    */
   async getPageIntro(pageTitle) {
-    try {
-      logger.debug(`Wikipedia: Fetching intro for "${pageTitle}"`);
-      
-      const response = await this.client.get('', {
-        params: {
-          action: 'query',
-          prop: 'extracts|pageprops',
-          exintro: true,           // Only intro section
-          explaintext: true,       // Plain text (no HTML)
-          titles: pageTitle,
-          format: 'json'
-        }
-      });
-      
-      const pages = response.data.query.pages;
-      const pageId = Object.keys(pages)[0];
-      
-      if (pageId === '-1') {
-        logger.debug(`Wikipedia: Page "${pageTitle}" not found`);
-        return null;
+    return this._coalesce('extracts', pageTitle, EXTRACT_BATCH, titles => this._fetchIntros(titles));
+  }
+
+  async _fetchIntros(titles) {
+    logger.debug(`Wikipedia: Fetching intros for ${titles.length} page(s)`);
+    const response = await this.client.get('', {
+      params: {
+        action: 'query',
+        prop: 'extracts|pageprops',
+        exintro: true,           // Only intro section
+        explaintext: true,       // Plain text (no HTML)
+        exlimit: 'max',          // an extract for every page asked for, not just the first
+        titles: titles.join('|'),
+        format: 'json'
       }
-      
-      const page = pages[pageId];
-      
-      // Check if this is a disambiguation page
-      if (page.pageprops && page.pageprops.disambiguation !== undefined) {
-        logger.debug(`Wikipedia: "${pageTitle}" is a disambiguation page, skipping`);
-        return null;
-      }
-      
-      const extract = page.extract;
-      
-      if (!extract || extract.trim() === '') {
-        logger.debug(`Wikipedia: No extract found for "${pageTitle}"`);
-        return null;
-      }
-      
-      // Additional check: if extract starts with "X may refer to:" it's likely disambiguation
-      if (extract.match(/^.+ may refer to:/i)) {
-        logger.debug(`Wikipedia: "${pageTitle}" appears to be disambiguation (text pattern), skipping`);
-        return null;
-      }
-      
-      logger.info(`Wikipedia: Successfully fetched overview for "${pageTitle}" (${extract.length} chars)`);
-      return extract.trim();
-      
-    } catch (error) {
-      logger.error(`Wikipedia: Failed to fetch intro for "${pageTitle}":`, error.message);
+    });
+
+    const query = response.data.query || {};
+    // MediaWiki tidies a title (underscores, first letter) before answering; map the title we asked for to the one it used
+    const used = new Map((query.normalized || []).map(n => [n.from, n.to]));
+    const byTitle = new Map(Object.values(query.pages || {}).map(page => [page.title, page]));
+
+    const intros = new Map();
+    for (const asked of titles) {
+      intros.set(asked, this._introOf(asked, byTitle.get(used.get(asked) || asked)));
+    }
+    return intros;
+  }
+
+  _introOf(pageTitle, page) {
+    if (!page || page.missing !== undefined) {
+      logger.debug(`Wikipedia: Page "${pageTitle}" not found`);
       return null;
     }
+
+    // Check if this is a disambiguation page
+    if (page.pageprops && page.pageprops.disambiguation !== undefined) {
+      logger.debug(`Wikipedia: "${pageTitle}" is a disambiguation page, skipping`);
+      return null;
+    }
+
+    const extract = page.extract;
+
+    if (!extract || extract.trim() === '') {
+      logger.debug(`Wikipedia: No extract found for "${pageTitle}"`);
+      return null;
+    }
+
+    // Additional check: if extract starts with "X may refer to:" it's likely disambiguation
+    if (extract.match(/^.+ may refer to:/i)) {
+      logger.debug(`Wikipedia: "${pageTitle}" appears to be disambiguation (text pattern), skipping`);
+      return null;
+    }
+
+    logger.info(`Wikipedia: Successfully fetched overview for "${pageTitle}" (${extract.length} chars)`);
+    return extract.trim();
   }
 
   /**
-   * Get album overview/description from Wikipedia
-   * @param {string} wikidataId - Wikidata ID (e.g., "Q163807")
-   * @param {string} albumTitle - Album title as fallback
-   * @param {string} artistName - Artist name to disambiguate
-   * @returns {Promise<string|null>} - Wikipedia intro text or null
+   * Overviews for several albums at once, from the Wikidata link MusicBrainz holds for each: the English Wikipedia titles
+   * come 50 to a call and the intros of all the pages 20 to a call. An album is never searched for by name: on a real
+   * library that found almost nothing (2 of 391 unlinked albums, one of them the wrong album) at one call each.
+   *
+   * @param {Array<{wikidataId: string}>} items
+   * @returns {Promise<Array<{overview: ?string, answered: boolean, error: ?Error}>>} one result per item, in order.
+   *   `answered` = Wikipedia was asked and replied (overview null then means there is none); `error` = a failure worth
+   *   retrying later (network, 429, 5xx); neither = a failure that retrying would not fix.
    */
-  async getAlbumOverview(wikidataId = null, albumTitle = null, artistName = null) {
-    const cacheKey = `wikipedia:album:${wikidataId || `${albumTitle}-${artistName}`}`;
-    
-    return this.cachedRequest(cacheKey, async () => {
-      let pageTitle = null;
-      
-      // Try to get Wikipedia page title from Wikidata ID
-      if (wikidataId) {
-        pageTitle = await this.getPageTitleFromWikidata(wikidataId);
+  async getAlbumOverviews(items) {
+    const results = items.map(() => ({ overview: null, answered: true, error: null }));
+    const titles = new Array(items.length).fill(null);
+    const failed = (i, error) => {
+      if (BaseProvider.isRetryableError(error)) results[i].error = error;
+      else results[i].answered = false;
+    };
+    const live = i => results[i].answered && !results[i].error;
+    const retried = (key, fn) => this.cachedRequest(key, fn, null, RETRIES);
+
+    // 1. Page titles from Wikidata
+    const linked = items.map((_, i) => i).filter(i => items[i].wikidataId);
+    for (let n = 0; n < linked.length; n += WIKIDATA_BATCH) {
+      const chunk = linked.slice(n, n + WIKIDATA_BATCH);
+      try {
+        const found = await retried(`wikidata:batch of ${chunk.length}`, () => this._fetchPageTitles([...new Set(chunk.map(i => items[i].wikidataId))]));
+        for (const i of chunk) titles[i] = found.get(items[i].wikidataId) || null;
+      } catch (error) {
+        logger.warn(`Wikipedia: Wikidata lookup for ${chunk.length} album(s) failed: ${error.message}`);
+        for (const i of chunk) failed(i, error);
       }
-      
-      // Fallback: Search by album title + artist name
-      if (!pageTitle && albumTitle) {
-        const searchQuery = artistName ? `${albumTitle} ${artistName} album` : albumTitle;
-        pageTitle = await this.searchPageByName(searchQuery);
+    }
+
+    // 2. The intros
+    const wanted = [...new Set(items.map((_, i) => i).filter(i => titles[i] && live(i)).map(i => titles[i]))];
+    const intros = new Map();
+    for (let n = 0; n < wanted.length; n += EXTRACT_BATCH) {
+      const chunk = wanted.slice(n, n + EXTRACT_BATCH);
+      try {
+        for (const [title, intro] of await retried(`wikipedia:intros batch of ${chunk.length}`, () => this._fetchIntros(chunk))) intros.set(title, intro);
+      } catch (error) {
+        logger.warn(`Wikipedia: fetching ${chunk.length} intro(s) failed: ${error.message}`);
+        items.forEach((_, i) => { if (live(i) && chunk.includes(titles[i])) failed(i, error); });
       }
-      
-      if (!pageTitle) {
-        logger.debug(`Wikipedia: No page found for album ${wikidataId || albumTitle}`);
-        return null;
-      }
-      
-      // Fetch the intro text
-      return await this.getPageIntro(pageTitle);
-    }, 7 * 24 * 60 * 60); // Cache for 7 days
+    }
+
+    items.forEach((_, i) => { if (live(i) && titles[i]) results[i].overview = intros.get(titles[i]) || null; });
+    return results;
   }
 
   /**

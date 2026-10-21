@@ -1,5 +1,6 @@
 const database = require('../sql/database');
 const { logger } = require('./logger');
+const blocklist = require('./blocklist');
 
 /**
  * LidarrFormatter - Complete translation from MusicBrainz format to Lidarr format
@@ -21,8 +22,8 @@ class LidarrFormatter {
     const images = await this.getImagesForEntity('artist', mbid);
 
     // Parse JSON fields
-    const aliases = this.parseJson(artist.aliases);
-    const genres = this.parseJson(artist.genres);
+    const aliases = this.aliasNames(artist.aliases);
+    const genres = this.genreNames(artist.genres);
 
     // Return with LOWERCASE field names (old LMD format for nested artists)
     return {
@@ -53,8 +54,8 @@ class LidarrFormatter {
     const albums = await this.getAlbumsForArtist(mbid);
 
     // Parse JSON fields
-    const aliases = this.parseJson(artist.aliases);
-    const genres = this.parseJson(artist.genres);
+    const aliases = this.aliasNames(artist.aliases);
+    const genres = this.genreNames(artist.genres);
 
     // Return ALL fields that old LMD returned (lowercase top-level, PascalCase Albums)
     return {
@@ -75,6 +76,96 @@ class LidarrFormatter {
     };
   }
 
+  // What Lidarr is sent for an artist nuLMD will not hold (a blocked one): its identity and no albums
+  blockedArtist(mbid, name) {
+    return {
+      Albums: [], artistaliases: [], artistname: name || 'Blocked artist', disambiguation: '', genres: [],
+      id: mbid, images: [], links: [], oldids: [], overview: '', rating: { Count: 0, Value: null },
+      sortname: name || 'Blocked artist', status: 'active', type: null
+    };
+  }
+
+  // Placeholder image so Lidarr always has something to show for a not-yet-cached entity.
+  placeholderImages(type = 'Poster') {
+    return [{ CoverType: type, Url: `${this.getServerUrl()}/assets/placeholder.png` }];
+  }
+
+  // Pad partial MB dates (YYYY, YYYY-MM) to full YYYY-MM-DD — matches what the store
+  // path writes to the DATE column. Lidarr deserializes releasedate as DateTime and
+  // rejects a partial like "2010", which fails the whole search response.
+  _fullReleaseDate(d) {
+    if (!d) return '0001-01-01';
+    const s = String(d).split('T')[0];
+    if (/^\d{4}$/.test(s)) return `${s}-01-01`;
+    if (/^\d{4}-\d{2}$/.test(s)) return `${s}-01`;
+    return s;
+  }
+
+  // Lightweight artist from a search result {id,name,sortName,disambiguation,type}.
+  // Same shape as formatArtist minus Albums (search strips Albums anyway). No MB fetch —
+  // full ingestion happens later when Lidarr looks up the picked artist via /artist/:mbid.
+  formatArtistLight(sr) {
+    return {
+      artistaliases: [],
+      artistname: sr.name || '',
+      disambiguation: sr.disambiguation || '',
+      genres: [],
+      id: sr.id,
+      images: this.placeholderImages(),
+      links: [],
+      oldids: [],
+      overview: '',
+      rating: { Count: 0, Value: null },
+      sortname: sr.sortName || sr.name || '',
+      status: 'active',
+      type: (sr.type && sr.type !== 'Unknown') ? sr.type : null
+    };
+  }
+
+  // Lightweight album from a search result {id,title,disambiguation,primaryType,
+  // secondaryTypes,firstReleaseDate,artistCredit}. Includes the primary artist in `artists`
+  // so Tubifarry won't throw KeyNotFoundException. No MB fetch.
+  formatAlbumLight(sr) {
+    const ac = sr.artistCredit || [];
+    const primary = (ac[0] && ac[0].artist) || {};
+    const artistId = primary.id || '';
+    const artistName = primary.name || (ac[0] && ac[0].name) || '';
+    const artists = artistId ? [{
+      artistaliases: [], artistname: artistName, disambiguation: primary.disambiguation || '',
+      genres: [], id: artistId, images: [], links: [], oldids: [],
+      overview: '', rating: { Count: 0, Value: null },
+      sortname: artistName, status: 'active', type: null
+    }] : [];
+    return {
+      aliases: [],
+      artistid: artistId,
+      artists,
+      disambiguation: sr.disambiguation || '',
+      genres: [],
+      id: sr.id,
+      images: this.placeholderImages(),
+      links: [],
+      oldids: [],
+      overview: '',
+      rating: { Count: 0, Value: null },
+      releasedate: this._fullReleaseDate(sr.firstReleaseDate),
+      releases: [],
+      secondarytypes: sr.secondaryTypes || [],
+      title: sr.title || '',
+      type: sr.primaryType || 'Other'
+    };
+  }
+
+  // Which of these release-group MBIDs are already stored (so search can format from DB).
+  async getReleaseGroupsPresent(mbids) {
+    if (!mbids.length) return new Set();
+    const result = await database.query(
+      'SELECT mbid FROM release_groups WHERE mbid = ANY($1)',
+      [mbids]
+    );
+    return new Set(result.rows.map(row => row.mbid));
+  }
+
   async getArtistsBatch(mbids) {
     if (!mbids.length) return new Map();
     const result = await database.query(
@@ -87,13 +178,13 @@ class LidarrFormatter {
   async getLinksBatch(entityType, mbids) {
     if (!mbids.length) return new Map();
     const result = await database.query(
-      'SELECT entity_mbid, link_type, url FROM links WHERE entity_type = $1 AND entity_mbid = ANY($2)',
+      'SELECT entity_mbid, type, url FROM relations WHERE entity_type = $1 AND entity_mbid = ANY($2) AND url IS NOT NULL',
       [entityType, mbids]
     );
     const map = new Map();
     result.rows.forEach(row => {
       if (!map.has(row.entity_mbid)) map.set(row.entity_mbid, []);
-      map.get(row.entity_mbid).push({ target: row.url, type: row.link_type });
+      map.get(row.entity_mbid).push({ target: row.url, type: row.type });
     });
     return map;
   }
@@ -103,15 +194,19 @@ class LidarrFormatter {
     const serverUrl = this.getServerUrl();
     const path = require('path');
     const result = await database.query(
-      'SELECT entity_mbid, url, cover_type, cached, local_path FROM images WHERE entity_type = $1 AND entity_mbid = ANY($2)',
+      'SELECT entity_mbid, url, cover_type, cached, cache_failed, local_path FROM images WHERE entity_type = $1 AND entity_mbid = ANY($2)',
       [entityType, mbids]
     );
     const map = new Map();
     result.rows.forEach(row => {
-      if (!map.has(row.entity_mbid)) map.set(row.entity_mbid, []);
+      // A cover still waiting to be downloaded is left out (the placeholder stands in): Lidarr must not fetch it from the provider
+      if (!row.cached && !row.cache_failed) return;
       const url = row.cached && row.local_path
         ? `${serverUrl}/api/images/${entityType}/${row.entity_mbid}/${path.basename(row.local_path)}`
         : row.url;
+      // Skip empty URLs — Lidarr HEADs cover URLs and errors on a blank one.
+      if (!url || String(url).trim() === '') return;
+      if (!map.has(row.entity_mbid)) map.set(row.entity_mbid, []);
       map.get(row.entity_mbid).push({ CoverType: row.cover_type, Url: url });
     });
     return map;
@@ -129,7 +224,7 @@ class LidarrFormatter {
     // Parse JSON fields
     const artistCredit = this.parseJson(releaseGroup.artist_credit);
     const secondaryTypes = this.parseJson(releaseGroup.secondary_types);
-    const genres = this.parseJson(releaseGroup.genres);
+    const genres = this.genreNames(releaseGroup.genres);
 
     // Extract primary artist ID
     const artistId = artistCredit && artistCredit.length > 0 ? artistCredit[0].artist.id : '';
@@ -156,10 +251,10 @@ class LidarrFormatter {
         const a = trackArtistsMap.get(id);
         if (a) {
           artistMap.set(id, {
-            artistaliases: this.parseJson(a.aliases) || [],
+            artistaliases: this.aliasNames(a.aliases),
             artistname: a.name,
             disambiguation: a.disambiguation || '',
-            genres: (this.parseJson(a.genres) || []).map(g => this.toTitleCase(g)),
+            genres: this.genreNames(a.genres).map(g => this.toTitleCase(g)),
             id: a.mbid,
             images: trackImagesMap.get(id) || [],
             links: trackLinksMap.get(id) || [],
@@ -171,11 +266,13 @@ class LidarrFormatter {
             type: a.type || null
           });
         } else {
+          // Not stored: a blocked artist is named from the blocklist, any other by its id
+          const label = blocklist.cachedName('artist', id) || id;
           artistMap.set(id, {
-            artistaliases: [], artistname: id, disambiguation: '',
+            artistaliases: [], artistname: label, disambiguation: '',
             genres: [], id: id, images: [], links: [], oldids: [],
             overview: '', rating: { Count: 0, Value: null },
-            sortname: id, status: 'active', type: null
+            sortname: label, status: 'active', type: null
           });
         }
       }
@@ -192,10 +289,10 @@ class LidarrFormatter {
         const primaryLinks = await this.getLinksForEntity('artist', artistId);
         const primaryImages = await this.getImagesForEntity('artist', artistId);
         artistMap.set(artistId, {
-          artistaliases: this.parseJson(primaryArtist.aliases) || [],
+          artistaliases: this.aliasNames(primaryArtist.aliases),
           artistname: primaryArtist.name,
           disambiguation: primaryArtist.disambiguation || '',
-          genres: (this.parseJson(primaryArtist.genres) || []).map(g => this.toTitleCase(g)),
+          genres: this.genreNames(primaryArtist.genres).map(g => this.toTitleCase(g)),
           id: primaryArtist.mbid,
           images: primaryImages || [],
           links: primaryLinks || [],
@@ -206,6 +303,11 @@ class LidarrFormatter {
           status: primaryArtist.ended ? 'ended' : 'active',
           type: primaryArtist.type || null
         });
+      } else if (blocklist.isBlocked('artist', artistId)) {
+        // Not stored because it is blocked: the album still has to list its primary artist
+        const blocked = this.blockedArtist(artistId, blocklist.cachedName('artist', artistId) || (artistCredit[0] && (artistCredit[0].name || artistCredit[0].artist.name)) || null);
+        delete blocked.Albums;
+        artistMap.set(artistId, blocked);
       }
     }
 
@@ -214,9 +316,7 @@ class LidarrFormatter {
 
     // Return with lowercase fields — alphabetical order matching oldLMD exactly
     const releasedate = releaseGroup.first_release_date
-      ? (releaseGroup.first_release_date instanceof Date
-          ? releaseGroup.first_release_date.toISOString().split('T')[0]
-          : String(releaseGroup.first_release_date).split('T')[0])
+      ? this._fullReleaseDate(releaseGroup.first_release_date)
       : '';
 
     return {
@@ -241,21 +341,21 @@ class LidarrFormatter {
 
   async getLinksForEntity(entityType, entityMbid) {
     const result = await database.query(`
-      SELECT link_type, url
-      FROM links
-      WHERE entity_type = $1 AND entity_mbid = $2
-      ORDER BY link_type
+      SELECT type, url
+      FROM relations
+      WHERE entity_type = $1 AND entity_mbid = $2 AND url IS NOT NULL
+      ORDER BY type, url
     `, [entityType, entityMbid]);
 
     return (result.rows || []).map(link => ({
       target: link.url,
-      type: link.link_type
+      type: link.type
     }));
   }
 
   async getImagesForEntity(entityType, entityMbid) {
     const result = await database.query(`
-      SELECT url, cover_type, cached, local_path
+      SELECT url, cover_type, cached, cache_failed, local_path
       FROM images
       WHERE entity_type = $1 AND entity_mbid = $2
       ORDER BY cover_type
@@ -269,25 +369,36 @@ class LidarrFormatter {
       return [{ CoverType: 'Poster', Url: `${serverUrl}/assets/placeholder.png` }];
     }
 
-    return (result.rows || []).map(image => {
+    // A cover still waiting to be downloaded is left out, so the placeholder below stands in for it: handing Lidarr the
+    // provider's own URL would make Lidarr fetch from there itself. A failed download keeps the external URL as a fallback.
+    const mapped = (result.rows || []).filter(image => image.cached || image.cache_failed).map(image => {
       // If image is cached locally, return local URL
       if (image.cached && image.local_path) {
         const path = require('path');
         const filename = path.basename(image.local_path);
-        const localUrl = `${serverUrl}/api/images/${entityType}/${entityMbid}/${filename}`;
-        
         return {
           CoverType: image.cover_type,
-          Url: localUrl
+          Url: `${serverUrl}/api/images/${entityType}/${entityMbid}/${filename}`
         };
       }
-      
+
       // Otherwise return external URL as fallback
       return {
         CoverType: image.cover_type,
         Url: image.url
       };
-    });
+    })
+    // Drop entries with an empty/missing URL: newer Lidarr HEAD-checks every
+    // cover and throws "Invalid URI: The URI is empty" on a blank RemoteUrl.
+    .filter(img => img.Url && String(img.Url).trim() !== '');
+
+    // If every stored row had an empty URL, fall back to the placeholder so
+    // Lidarr still receives a valid, non-empty URL.
+    if (mapped.length === 0) {
+      return [{ CoverType: 'Poster', Url: `${serverUrl}/assets/placeholder.png` }];
+    }
+
+    return mapped;
   }
 
   getServerUrl() {
@@ -322,21 +433,16 @@ class LidarrFormatter {
   }
 
   async getAlbumsForArtist(artistMbid) {
-    // Only return albums after fetch_artist_albums job has completed.
-    // Until then return empty list — Lidarr adds artist with zero albums.
-    // fetchArtistAlbums runs ensureAlbum for every release group, gets correct
-    // artist_credit from MB, then triggers a Lidarr refresh. Ghost albums
-    // never reach Lidarr because their artistid points to a different artist.
-    const jobDone = await database.query(
-      `SELECT 1 FROM metadata_jobs
-       WHERE job_type = 'fetch_artist_albums'
-       AND entity_mbid = $1
-       AND status = 'completed'
-       LIMIT 1`,
+    // Only return albums once the artist's catalog is complete (every release group, and every release of each,
+    // stored and checked by the catalog job). Until then return an empty list: Lidarr adds the artist with zero
+    // albums and is asked to refresh when the catalog is ready. The credits arrive with the bulk fetch, so a
+    // collaborative release never reaches Lidarr under the wrong artist.
+    const done = await database.query(
+      'SELECT 1 FROM artists WHERE mbid = $1 AND catalog_complete_at IS NOT NULL',
       [artistMbid]
     );
-    if (jobDone.rows.length === 0) {
-      logger.info(`getAlbumsForArtist ${artistMbid}: fetch_artist_albums not yet complete — returning empty list`);
+    if (done.rows.length === 0) {
+      logger.info(`getAlbumsForArtist ${artistMbid}: catalog not yet complete — returning empty list`);
       return [];
     }
 
@@ -359,7 +465,7 @@ class LidarrFormatter {
       FROM release_groups rg
       JOIN artist_release_groups arg ON arg.release_group_mbid = rg.mbid
       WHERE arg.artist_mbid = $1
-      ORDER BY rg.first_release_date DESC NULLS LAST, rg.title
+      ORDER BY rg.first_release_date DESC NULLS LAST, rg.title, rg.mbid
     `, [artistMbid]);
 
     const filtered = (result.rows || []).filter(album => {
@@ -402,7 +508,7 @@ class LidarrFormatter {
         media
       FROM releases
       WHERE release_group_mbid = $1
-      ORDER BY release_date ASC NULLS LAST, country, title
+      ORDER BY release_date ASC NULLS LAST, country, title, mbid
     `, [releaseGroupMbid]);
 
     return (result.rows || []).map(release => {
@@ -422,11 +528,7 @@ class LidarrFormatter {
         title: release.title,
         disambiguation: release.disambiguation || '',
         status: release.status || 'Pseudo-Release',
-        releasedate: release.release_date
-          ? (release.release_date instanceof Date
-              ? release.release_date.toISOString().split('T')[0]
-              : String(release.release_date).split('T')[0])
-          : '0001-01-01',
+        releasedate: this._fullReleaseDate(release.release_date),
         country: release.country ? [release.country] : [],
         label: labelNames || [],
         media: mediaOutput,
@@ -500,6 +602,15 @@ class LidarrFormatter {
   }
 
   // Helper to parse JSON fields safely
+  // Artists store MusicBrainz's alias/genre objects; Lidarr wants plain names (tolerates old bare strings)
+  aliasNames(value) {
+    return (this.parseJson(value) || []).map(a => (typeof a === 'string' ? a : a && a.name)).filter(Boolean);
+  }
+
+  genreNames(value) {
+    return (this.parseJson(value) || []).map(g => (typeof g === 'string' ? g : g && g.name)).filter(Boolean);
+  }
+
   parseJson(value) {
     if (!value) return null;
     if (typeof value === 'string') {

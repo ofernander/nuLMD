@@ -11,6 +11,9 @@
 const axios = require('axios');
 const { logger } = require('./logger');
 const config = require('./config');
+const { USER_AGENT } = require('./userAgent');
+
+const MISS_REFRESH_MS = 15 * 1000;   // an artist missing from the map is looked for again at most this often
 
 class LidarrClient {
   constructor() {
@@ -23,25 +26,28 @@ class LidarrClient {
     this.artistMap = new Map();
     this.lastMapRefresh = null;
     this.mapRefreshInterval = 30 * 60 * 1000; // 30 minutes
+
+    // Live reachability, updated by every probe (testConnection). null = never probed.
+    this.lastCheckOk = null;
+    this.lastCheckAt = null;
+    this.lastError = null;
   }
 
   /**
-   * Initialize client from config. 
+   * Initialize client from config and environment (the environment wins; see config.lidarrSettings).
    * Call after config.load() completes.
-   * Silently disables if URL or API key missing.
+   * There is no switch: it is on exactly when there is both a URL and an API key.
    */
   initialize() {
-    const cfg = config.get('lidarrIntegration', {});
-    this.url = cfg.url || process.env.LIDARR_URL || '';
-    this.apiKey = cfg.apiKey || process.env.LIDARR_API_KEY || '';
-    this.enabled = cfg.enabled !== false;
+    const settings = config.lidarrSettings();
+    this.url = settings.url;
+    this.apiKey = settings.apiKey;
+    this.enabled = settings.enabled;
 
-    // Guard: need both URL and API key
-    if (!this.url || !this.apiKey) {
-      if (this.enabled) {
-        logger.warn('Lidarr-Client: enabled but URL or API key missing — disabled');
+    if (!this.enabled) {
+      if (this.url || this.apiKey) {
+        logger.warn('Lidarr-Client: needs both a URL and an API key — off');
       }
-      this.enabled = false;
       this.client = null;
       return;
     }
@@ -51,7 +57,7 @@ class LidarrClient {
 
     this.client = axios.create({
       baseURL: `${this.url}/api/v1`,
-      headers: { 'X-Api-Key': this.apiKey },
+      headers: { 'X-Api-Key': this.apiKey, 'User-Agent': USER_AGENT },
       timeout: 15000
     });
 
@@ -62,21 +68,57 @@ class LidarrClient {
    * Test connection to Lidarr.
    * @returns {Promise<{success: boolean, version?: string, error?: string}>}
    */
-  async testConnection() {
+  async testConnection(opts = {}) {
     if (!this.client) {
-      return { success: false, error: 'Client not initialized' };
+      this.lastCheckOk = false;
+      this.lastCheckAt = Date.now();
+      this.lastError = 'Client not initialized';
+      return { success: false, error: this.lastError };
     }
 
     try {
       const response = await this.client.get('/system/status');
       const version = response.data?.version || 'unknown';
-      logger.info(`Lidarr-Client: connection OK — version ${version}`);
+      this.lastCheckOk = true;
+      this.lastCheckAt = Date.now();
+      this.lastError = null;
+      if (!opts.silent) logger.info(`Lidarr-Client: connection OK — version ${version}`);
       return { success: true, version };
     } catch (error) {
       const msg = this._formatError(error);
-      logger.error(`Lidarr-Client: connection test failed: ${msg}`);
+      this.lastCheckOk = false;
+      this.lastCheckAt = Date.now();
+      this.lastError = msg;
+      if (!opts.silent) logger.error(`Lidarr-Client: connection test failed: ${msg}`);
       return { success: false, error: msg };
     }
+  }
+
+  /**
+   * Silent probe with UP/DOWN state-change logging. Safe to call frequently.
+   * @returns {Promise<boolean>} whether Lidarr is currently reachable
+   */
+  async _probe() {
+    const was = this.lastCheckOk;
+    const r = await this.testConnection({ silent: true });
+    if (was !== r.success) {
+      if (r.success) logger.info('Lidarr-Client: connection recovered — UP');
+      else logger.warn(`Lidarr-Client: connection lost — DOWN (${r.error})`);
+    }
+    return r.success;
+  }
+
+  /**
+   * Ensure we have a working connection: re-init if the client was lost, probe,
+   * and retry once after a short delay to ride out a transient first-request blip.
+   * @returns {Promise<boolean>}
+   */
+  async ensureConnected() {
+    if (!this.client) this.initialize();
+    if (!this.client) return false; // not configured
+    if (await this._probe()) return true;
+    await new Promise(r => setTimeout(r, 1000));
+    return this._probe();
   }
 
   /**
@@ -111,6 +153,37 @@ class LidarrClient {
   }
 
   /**
+   * Set of artist foreign IDs (MusicBrainz artist MBIDs) currently in Lidarr.
+   * Reflects the last refreshArtistMap() call — refresh first for accuracy.
+   * @returns {Set<string>}
+   */
+  getArtistForeignIds() {
+    return new Set(this.artistMap.keys());
+  }
+
+  /**
+   * Fetch all album foreign IDs (release-group MBIDs) from Lidarr.
+   * @returns {Promise<{ids: Set<string>, reachable: boolean}>}
+   */
+  async getAlbumForeignIds() {
+    if (!this.client) return { ids: new Set(), reachable: false };
+    try {
+      const response = await this.client.get('/album');
+      const albums = response.data || [];
+      const ids = new Set();
+      for (const album of albums) {
+        if (album.foreignAlbumId) ids.add(album.foreignAlbumId);
+      }
+      logger.info(`Lidarr-Client: fetched ${ids.size} album foreign IDs`);
+      return { ids, reachable: true };
+    } catch (error) {
+      const msg = this._formatError(error);
+      logger.error(`Lidarr-Client: failed to fetch albums: ${msg}`);
+      return { ids: new Set(), reachable: false };
+    }
+  }
+
+  /**
    * Get Lidarr integer ID for an artist by MBID.
    * Refreshes the map if stale.
    * @param {string} mbid - MusicBrainz artist ID
@@ -127,6 +200,25 @@ class LidarrClient {
 
     const entry = this.artistMap.get(mbid);
     return entry ? entry.id : null;
+  }
+
+  /**
+   * Whether an artist is in Lidarr's library: true or false once that is known, null when it cannot be told (Lidarr not
+   * connected, or unreachable). An artist missing from the map gets one map refresh, because it may have been added a
+   * moment ago; refreshes are shared between concurrent callers and at most one is made per MISS_REFRESH_MS, and a miss
+   * inside that window is "unknown" (null), never a recorded "no", so the next request asks again.
+   * @param {string} mbid - MusicBrainz artist ID
+   * @returns {Promise<boolean|null>}
+   */
+  async isInLidarr(mbid) {
+    if (!this.enabled || !this.client) return null;
+    if (this.artistMap.has(mbid)) return true;
+    if (!this._mapRefreshing) {
+      if (this.lastMapRefresh && Date.now() - this.lastMapRefresh < MISS_REFRESH_MS) return null;
+      this._mapRefreshing = this.refreshArtistMap().finally(() => { this._mapRefreshing = null; });
+    }
+    const { reachable } = await this._mapRefreshing;
+    return reachable ? this.artistMap.has(mbid) : null;
   }
 
   /**
@@ -227,41 +319,60 @@ class LidarrClient {
   }
 
   /**
-   * Periodic health check — every 10 minutes.
-   * Re-initializes if client was lost and Lidarr is back up.
-   * Also keeps the artist map fresh.
+   * Periodic health check. Two decoupled cadences:
+   *  - probeMs (fast, cheap): GET /system/status to track live reachability, plus a
+   *    reconciliation sweep that re-delivers any Lidarr refreshes missed during a
+   *    stale window or restart.
+   *  - mapMs (slow): full artist-map refresh (GET /artist can be large — don't do it
+   *    every probe). On-demand refresh via getLidarrId still covers staleness between.
    */
-  startHealthCheck(intervalMs = 10 * 60 * 1000) {
+  startHealthCheck(probeMs = 15 * 1000, mapMs = 30 * 60 * 1000) {
     setInterval(async () => {
       if (!this.url || !this.apiKey) return; // not configured, nothing to check
-      // If client was never created or dropped, attempt re-init first
       if (!this.client) {
         this.initialize();
-        if (!this.client) return; // still no config
+        if (!this.client) return;
       }
-      const result = await this.testConnection();
-      if (result.success) {
+      const up = await this._probe();
+      if (up) {
         if (!this.enabled) {
           logger.info('Lidarr-Client: health check recovered connection — re-enabling');
           this.enabled = true;
         }
-        await this.refreshArtistMap();
-      } else {
-        logger.warn(`Lidarr-Client: health check failed: ${result.error}`);
+        // Re-deliver any refreshes that never landed. Kept out of lidarrClient (no DB
+        // here) — the job queue owns the jobs table.
+        try {
+          const backgroundJobQueue = require('./backgroundJobQueue');
+          if (backgroundJobQueue.reconcilePendingRefreshes) {
+            await backgroundJobQueue.reconcilePendingRefreshes();
+          }
+        } catch (err) {
+          logger.warn(`Lidarr-Client: refresh reconciliation error: ${err.message}`);
+        }
       }
-    }, intervalMs);
+    }, probeMs);
+
+    setInterval(async () => {
+      if (this.client && this.enabled && this.lastCheckOk) {
+        await this.refreshArtistMap();
+      }
+    }, mapMs);
   }
 
   /**
-   * Get map stats for debugging/UI.
+   * Get map stats for debugging/UI. `connected` reflects the last real probe, not
+   * merely whether a client object exists.
    */
   getStats() {
     return {
       enabled: this.enabled,
       url: this.url || null,
-      connected: !!this.client,
+      connected: this.lastCheckOk === true,
+      clientReady: !!this.client,
       artistCount: this.artistMap.size,
-      lastMapRefresh: this.lastMapRefresh ? new Date(this.lastMapRefresh).toISOString() : null
+      lastMapRefresh: this.lastMapRefresh ? new Date(this.lastMapRefresh).toISOString() : null,
+      lastCheckAt: this.lastCheckAt ? new Date(this.lastCheckAt).toISOString() : null,
+      lastError: this.lastError
     };
   }
 

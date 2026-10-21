@@ -1,57 +1,8 @@
 const { registry } = require('./providerRegistry');
 const metaHandler = require('./metaHandler');
 const { logger } = require('./logger');
-
-const MAX_ITEM_RETRIES = 10;
-
-/**
- * Retry a list of failed items with backoff between attempts.
- * @param {Array} failedItems - items to retry
- * @param {Function} processFn - async fn(item) that processes one item
- * @param {string} label - label for logging (e.g. "release-group")
- * @returns {Array} items that still failed after all retries
- */
-async function retryFailed(failedItems, processFn, label) {
-  let remaining = [...failedItems];
-
-  logger.info(`Scheduling retries for ${remaining.length} failed ${label}(s) - will attempt up to ${MAX_ITEM_RETRIES} times each`);
-
-  for (let attempt = 1; attempt <= MAX_ITEM_RETRIES && remaining.length > 0; attempt++) {
-    logger.info(`Retry round ${attempt}/${MAX_ITEM_RETRIES}: ${remaining.length} ${label}(s) to process - hang tight, we'll get them!`);
-    const stillFailing = [];
-
-    for (const item of remaining) {
-      const itemId = typeof item === 'string' ? item : item.id;
-      try {
-        await processFn(item);
-        logger.info(`Retry succeeded for ${label} ${itemId} (round ${attempt}/${MAX_ITEM_RETRIES})`);
-      } catch (error) {
-        const attemptsLeft = MAX_ITEM_RETRIES - attempt;
-        if (attemptsLeft > 0) {
-          logger.warn(`Retry round ${attempt} failed for ${label} ${itemId}: ${error.message} - ${attemptsLeft} round(s) remaining`);
-        } else {
-          logger.error(`Final retry failed for ${label} ${itemId}: ${error.message} - no more retries`);
-        }
-        stillFailing.push(item);
-      }
-    }
-
-    if (stillFailing.length === 0) {
-      logger.info(`All ${label}(s) recovered successfully after ${attempt} retry round(s)!`);
-    } else if (attempt < MAX_ITEM_RETRIES) {
-      logger.info(`${remaining.length - stillFailing.length} ${label}(s) recovered, ${stillFailing.length} still pending - continuing retries...`);
-    }
-
-    remaining = stillFailing;
-  }
-
-  if (remaining.length > 0) {
-    const ids = remaining.map(i => typeof i === 'string' ? i : i.id).join(', ');
-    logger.error(`${remaining.length} ${label}(s) could not be fetched after ${MAX_ITEM_RETRIES} retry rounds: ${ids}`);
-  }
-
-  return remaining;
-}
+const lidarrClient = require('./lidarrClient');
+const blocklist = require('./blocklist');
 
 /**
  * Process a metadata fetch job
@@ -70,13 +21,98 @@ async function processJob(job) {
       await fetchAlbumFull(entity_mbid);
       break;
 
+    case 'backfill_artist':
+      await backfillArtist(entity_mbid);
+      break;
+
+    case 'backfill_album':
+      await backfillAlbum(entity_mbid);
+      break;
+
+    case 'complete_rg_list':
+    case 'complete_release_list': {
+      const { browse } = require('./mbWs/services');
+      const queue = require('./backgroundJobQueue');
+      // Be a polite background task: between pages, wait for nuLMD to be idle (up to ~10 minutes)
+      const waitIdle = async () => {
+        for (let i = 0; i < 200; i++) {
+          if (await queue.isIdle()) return;
+          await new Promise(resolve => setTimeout(resolve, 3000));
+        }
+        throw new Error('nuLMD stayed busy, list will be finished later');
+      };
+      await browse().runJob(job, { waitIdle });
+      break;
+    }
+
     default:
       throw new Error(`Unknown job type: ${job_type}`);
   }
 }
 
+function isNotFound(error) {
+  return !!(error && error.message && error.message.includes('Resource not found'));
+}
+
 /**
- * Fetch all albums for an artist
+ * Backfill: re-fetch a row that was filled from a non-MusicBrainz source (e.g. an LMD upstream)
+ * from MusicBrainz itself, so the fields upstream can't provide get filled. MusicBrainz is the
+ * authority, so its data replaces the row's; the one exception is the overview, which MB doesn't
+ * supply and which an upstream (or Wikipedia) already gave us.
+ *
+ * These calls are pinned to MusicBrainz sources, never an LMD upstream.
+ * Releases are deliberately not re-fetched: what an upstream lacks there (barcodes) isn't served
+ * to Lidarr, and each release is an extra MB request.
+ */
+async function backfillArtist(mbid) {
+  const database = require('../sql/database');
+  if (blocklist.isBlocked('artist', mbid)) return;
+  const mb = registry.getProvider('musicbrainz');
+  const mbOnly = typeof mb.onlyMusicBrainz === 'function' ? mb.onlyMusicBrainz() : mb;
+
+  const existing = await database.query('SELECT overview FROM artists WHERE mbid = $1', [mbid]);
+  if (existing.rows.length === 0) return;
+
+  let data;
+  try {
+    data = await mbOnly.getArtist(mbid);
+  } catch (error) {
+    if (!isNotFound(error)) throw error;
+    // MBID merged/removed on MusicBrainz: nothing to fill, stop retrying it
+    logger.warn(`Backfill: artist ${mbid} not found on MusicBrainz, clearing flag`);
+    await database.query('UPDATE artists SET needs_mb_backfill = FALSE WHERE mbid = $1', [mbid]);
+    return;
+  }
+  await metaHandler.storeArtist(mbid, { ...data, overview: existing.rows[0].overview || '' }, true);
+  logger.info(`Backfill: artist ${mbid} filled from MusicBrainz`);
+}
+
+async function backfillAlbum(mbid) {
+  const database = require('../sql/database');
+  if (blocklist.isBlocked('release_group', mbid)) return;
+  const mb = registry.getProvider('musicbrainz');
+  const mbOnly = typeof mb.onlyMusicBrainz === 'function' ? mb.onlyMusicBrainz() : mb;
+
+  const existing = await database.query('SELECT overview FROM release_groups WHERE mbid = $1', [mbid]);
+  if (existing.rows.length === 0) return;
+
+  let data;
+  try {
+    data = await mbOnly.getReleaseGroup(mbid);
+  } catch (error) {
+    if (!isNotFound(error)) throw error;
+    logger.warn(`Backfill: release group ${mbid} not found on MusicBrainz, clearing flag`);
+    await database.query('UPDATE release_groups SET needs_mb_backfill = FALSE WHERE mbid = $1', [mbid]);
+    return;
+  }
+  await metaHandler.storeReleaseGroup(mbid, { ...data, overview: existing.rows[0].overview || '' }, null, { force: true });
+  logger.info(`Backfill: release group ${mbid} filled from MusicBrainz`);
+}
+
+/**
+ * Fetch an artist's whole catalog: every release group and every release of every status, in a few bulk calls
+ * (metaHandler.ingestCatalog), then queue the wiki and image jobs for each album and the artist.
+ * Any failure fails the job, which is retried as a whole: a half-filled artist is never presented as finished.
  */
 async function fetchArtistAlbums(job) {
   const artistMbid = job.entity_mbid;
@@ -84,141 +120,97 @@ async function fetchArtistAlbums(job) {
   const skipArtistImages = job.metadata?.skipArtistImages || false;
   const skipAlbumImages  = job.metadata?.skipAlbumImages  || false;
   const forceRefresh     = job.metadata?.forceRefresh     || false;
+  const imagesOnly       = job.metadata?.imagesOnly       || false;   // the catalog is held: only the image lookups are owed
 
-  const BLOCKED = new Set(['89ad4ac3-39f7-470e-963a-56509c546377', 'fe5b7087-438f-4e6e-bf3d-4a5b65e8d8b6']);
-  if (BLOCKED.has(artistMbid)) {
+  if (blocklist.isBlocked('artist', artistMbid)) {
     logger.info(`fetchArtistAlbums: skipping blocked entity ${artistMbid}`);
     return;
   }
 
-  const database = require('../sql/database');
   const backgroundJobQueue = require('./backgroundJobQueue');
 
-  // Get all release groups already stored for this artist
-  const releaseGroups = await metaHandler.getArtistReleaseGroups(artistMbid);
-
-  // Safety: refuse to process artists with absurd album counts
-  if (releaseGroups.length > 2000) {
-    logger.warn(`fetchArtistAlbums: artist ${artistMbid} has ${releaseGroups.length} release groups, exceeds safety limit of 2000, skipping`);
-    return;
-  }
-
-  logger.info(`Background: artist ${artistMbid} has ${releaseGroups.length} release groups, checking for missing releases`);
-
-  let fetched = 0;
-  const failedAlbums = [];
-
-  for (const rgMbid of releaseGroups) {
+  if (!imagesOnly) {
     try {
-      const { needsFullFetch } = await metaHandler.ensureAlbum(rgMbid, forceRefresh);
-      fetched++;
-      logger.info(`Background: ensureAlbum complete for ${rgMbid} (${fetched}/${releaseGroups.length}) — needsFullFetch=${needsFullFetch}`);
-
-      // Queue fetch_album_full as tree child if album has remaining releases
-      if (needsFullFetch) {
-        const fullFetchQueueFn = forceRefresh
-          ? backgroundJobQueue.forceQueueJob.bind(backgroundJobQueue)
-          : backgroundJobQueue.queueJob.bind(backgroundJobQueue);
-        await fullFetchQueueFn('fetch_album_full', 'release_group', rgMbid, 1, null, rootJobId, artistMbid);
-        logger.info(`Queued tree fetch_album_full for album ${rgMbid}`);
+      let result;
+      try {
+        result = await metaHandler.ingestCatalog(artistMbid, { force: forceRefresh });
+      } catch (error) {
+        // MusicBrainz could not answer (again) and we hold nothing for this artist: the upstreams stand in, provisionally
+        if (error.overLimit || !(await metaHandler.upstreamFallbackAllowed(artistMbid, error, job.attempts))) throw error;
+        logger.warn(`fetchArtistAlbums: MusicBrainz failed for ${artistMbid} (${error.message}); using the upstream fallback`);
+        result = { ...(await metaHandler.ingestCatalogFromUpstream(artistMbid)), firstTime: true };
       }
-
-      // Queue wiki and image jobs for this album as tree children
-      const albumWikiQueueFn = forceRefresh ? backgroundJobQueue.forceQueueJob.bind(backgroundJobQueue) : backgroundJobQueue.queueJob.bind(backgroundJobQueue);
-      await albumWikiQueueFn('fetch_album_wiki', 'release_group', rgMbid, 1, forceRefresh ? { forceRefresh: true } : null, rootJobId, artistMbid);
-      if (!skipAlbumImages && backgroundJobQueue.hasAlbumImageProvider()) {
-        await backgroundJobQueue.queueJob('fetch_album_images', 'release_group', rgMbid, 1, null, rootJobId, artistMbid);
-      }
+      const { groups, releases, firstTime } = result;
+      logger.info(`Background: artist ${artistMbid} catalog complete: ${groups} release groups, ${releases} releases`);
+      // Lidarr has all it needs to list the albums: tell it now, before the wiki and image work (stage 1 of the refresh)
+      if (firstTime) await backgroundJobQueue.triggerCatalogRefresh(rootJobId, artistMbid);
     } catch (error) {
-      logger.warn(`Background: failed to ensure album ${rgMbid}: ${error.message}`);
-      failedAlbums.push(rgMbid);
+      // Safety: refuse to process artists with absurd album counts
+      if (error.overLimit) {
+        logger.warn(`fetchArtistAlbums: artist ${artistMbid} skipped: ${error.message}`);
+        return;
+      }
+      throw error;
     }
   }
 
-  // Retry failures
-  if (failedAlbums.length > 0) {
-    await retryFailed(failedAlbums, async (rgMbid) => {
-      const { needsFullFetch } = await metaHandler.ensureAlbum(rgMbid, forceRefresh);
-      if (needsFullFetch) {
-        const retryFullFetchQueueFn = forceRefresh
-          ? backgroundJobQueue.forceQueueJob.bind(backgroundJobQueue)
-          : backgroundJobQueue.queueJob.bind(backgroundJobQueue);
-        await retryFullFetchQueueFn('fetch_album_full', 'release_group', rgMbid, 1, null, rootJobId, artistMbid);
-      }
-      const retryAlbumWikiQueueFn = forceRefresh ? backgroundJobQueue.forceQueueJob.bind(backgroundJobQueue) : backgroundJobQueue.queueJob.bind(backgroundJobQueue);
-      await retryAlbumWikiQueueFn('fetch_album_wiki', 'release_group', rgMbid, 1, forceRefresh ? { forceRefresh: true } : null, rootJobId, artistMbid);
-      if (!skipAlbumImages && backgroundJobQueue.hasAlbumImageProvider()) {
-        await backgroundJobQueue.queueJob('fetch_album_images', 'release_group', rgMbid, 1, null, rootJobId, artistMbid);
-      }
-    }, 'album-releases');
+  const releaseGroups = await metaHandler.getArtistReleaseGroups(artistMbid);
+
+  // Only the albums that still have something to look up get a job: one with an overview and images (or a recorded
+  // "nothing found") needs no wiki or image work, and a forced refresh looks everything up again
+  const wikiNeeded = new Set(forceRefresh ? releaseGroups : await backgroundJobQueue.albumsNeedingWiki(releaseGroups));
+  // Images are fetched only for an artist that is in Lidarr (unknown, e.g. Lidarr unreachable, counts as not yet: a later
+  // /artist request that finds it in Lidarr queues an images-only catch-up). With the integration off there is no gate.
+  const inLidarr = !lidarrClient.enabled || (await lidarrClient.isInLidarr(artistMbid)) === true;
+  if (!inLidarr) logger.info(`fetchArtistAlbums: artist ${artistMbid} is not in Lidarr, no images fetched`);
+  const imagesWanted = inLidarr && !skipAlbumImages && backgroundJobQueue.hasAlbumImageProvider();
+  const imagesNeeded = new Set(!imagesWanted ? [] : forceRefresh ? releaseGroups : await backgroundJobQueue.albumsNeedingImages(releaseGroups));
+
+  for (const rgMbid of releaseGroups) {
+    if (!wikiNeeded.has(rgMbid) && !imagesNeeded.has(rgMbid)) continue;
+
+    // Bail if the root job was killed (kill-active) or pruned while we ran —
+    // no point queuing children under a parent that no longer exists.
+    if (!(await backgroundJobQueue.isJobActive(rootJobId))) {
+      logger.warn(`fetchArtistAlbums: root job ${rootJobId} no longer active (killed/removed) — stopped queuing children for artist ${artistMbid}`);
+      return;
+    }
+
+    // Queue wiki and image jobs for this album as tree children
+    if (wikiNeeded.has(rgMbid)) {
+      const albumWikiQueueFn = forceRefresh ? backgroundJobQueue.forceQueueJob.bind(backgroundJobQueue) : backgroundJobQueue.queueJob.bind(backgroundJobQueue);
+      await albumWikiQueueFn('fetch_album_wiki', 'release_group', rgMbid, 1, forceRefresh ? { forceRefresh: true } : null, rootJobId, artistMbid);
+    }
+    if (imagesNeeded.has(rgMbid)) {
+      await backgroundJobQueue.queueJob('fetch_album_images', 'release_group', rgMbid, 1, null, rootJobId, artistMbid);
+    }
   }
 
-  logger.info(`Background: completed fetching releases for artist ${artistMbid}: ${fetched} albums processed, ${failedAlbums.length} failed`);
+  // Stop if the tree was killed while we queued
+  if (!(await backgroundJobQueue.isJobActive(rootJobId))) {
+    logger.warn(`fetchArtistAlbums: root job ${rootJobId} no longer active after album loop — skipping artist-level children for ${artistMbid}`);
+    return;
+  }
 
   // Queue artist wiki and image jobs as tree children
-  const artistWikiQueueFn = forceRefresh ? backgroundJobQueue.forceQueueJob.bind(backgroundJobQueue) : backgroundJobQueue.queueJob.bind(backgroundJobQueue);
-  await artistWikiQueueFn('fetch_artist_wiki', 'artist', artistMbid, 1, forceRefresh ? { forceRefresh: true } : null, rootJobId, artistMbid);
-  if (!skipArtistImages && backgroundJobQueue.hasArtistImageProvider()) {
+  if (forceRefresh || await backgroundJobQueue.artistNeedsWiki(artistMbid)) {
+    const artistWikiQueueFn = forceRefresh ? backgroundJobQueue.forceQueueJob.bind(backgroundJobQueue) : backgroundJobQueue.queueJob.bind(backgroundJobQueue);
+    await artistWikiQueueFn('fetch_artist_wiki', 'artist', artistMbid, 1, forceRefresh ? { forceRefresh: true } : null, rootJobId, artistMbid);
+  }
+  if (inLidarr && !skipArtistImages && backgroundJobQueue.hasArtistImageProvider() && (forceRefresh || await backgroundJobQueue.artistNeedsImages(artistMbid))) {
     await backgroundJobQueue.queueJob('fetch_artist_images', 'artist', artistMbid, 1, null, rootJobId, artistMbid);
   }
 }
 
 /**
- * Fetch complete album data: release group + remaining releases
- * Does NOT store track artists or the primary album artist — those are handled elsewhere
+ * Fetch complete album data: the release group and every release MusicBrainz lists for it (the UI's "fetch album"
+ * action). The same routine a Lidarr album request uses, forced.
  */
 async function fetchAlbumFull(releaseGroupMbid) {
-  const mbProvider = registry.getProvider('musicbrainz');
-  const config = require('./config');
-
+  if (blocklist.isBlocked('release_group', releaseGroupMbid)) return;
   logger.info(`Fetching complete album data for ${releaseGroupMbid}`);
-
-  // Fetch release group
-  const releaseGroupData = await mbProvider.getReleaseGroup(releaseGroupMbid);
-
-  // Store release group (artist already in DB from synchronous path)
-  await metaHandler.storeReleaseGroup(releaseGroupMbid, releaseGroupData, null, { force: true });
-
-  // Fetch remaining releases — skip only what's already stored in DB, apply status filter
-  const allReleases = releaseGroupData.releases || [];
-  const statusFilter = config.get('metadata.fetchTypes.releaseStatuses', ['Official']);
-  const database = require('../sql/database');
-  const storedResult = await database.query(
-    'SELECT mbid FROM releases WHERE release_group_mbid = $1',
-    [releaseGroupMbid]
-  );
-  const storedMbids = new Set(storedResult.rows.map(r => r.mbid));
-
-  const remainingReleases = allReleases.filter(r => {
-    const alreadyFetched = storedMbids.has(r.id);
-    const matchesFilter = statusFilter.length === 0 || statusFilter.includes(r.status || 'Pseudo-Release');
-    return !alreadyFetched && matchesFilter;
-  });
-
-  logger.info(`Album ${releaseGroupMbid}: ${allReleases.length} releases from MB, ${storedMbids.size} already in DB, ${remainingReleases.length} remaining to fetch`);
-  logger.info(`Fetching ${remainingReleases.length} remaining releases for album ${releaseGroupMbid}`);
-
-  const failedReleases = [];
-
-  for (const release of remainingReleases) {
-    try {
-      const fullRelease = await mbProvider.getRelease(release.id);
-      await metaHandler.storeRelease(release.id, fullRelease);
-      logger.info(`Stored ${release.status || 'Other'} release ${release.id}`);
-    } catch (error) {
-      logger.warn(`Failed to fetch ${release.status || 'Other'} release ${release.id} (will retry): ${error.message}`);
-      failedReleases.push(release);
-    }
-  }
-
-  if (failedReleases.length > 0) {
-    await retryFailed(failedReleases, async (release) => {
-      const fullRelease = await mbProvider.getRelease(release.id);
-      await metaHandler.storeRelease(release.id, fullRelease);
-    }, 'release');
-  }
-
-  logger.info(`Completed fetching remaining releases for album ${releaseGroupMbid}`);
+  await metaHandler.ensureAlbum(releaseGroupMbid, true);
+  logger.info(`Completed fetching releases for album ${releaseGroupMbid}`);
 }
 
 module.exports = { processJob };

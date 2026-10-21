@@ -3,6 +3,10 @@ const fs = require('fs').promises;
 const path = require('path');
 const database = require('../sql/database');
 const { logger } = require('./logger');
+const { USER_AGENT } = require('./userAgent');
+
+// A download that failed is tried again by the download queue this many times in all (an hour apart)
+const MAX_AUTO_RETRIES = 3;
 
 /**
  * ImageDownloader - Downloads and caches images from external providers
@@ -15,6 +19,7 @@ class ImageDownloader {
     // Base path relative to project root
     this.basePath = path.join(__dirname, '../../data/images');
     this.maxRetries = 3;
+    this.maxAutoRetries = MAX_AUTO_RETRIES;
     this.timeout = 10000; // 10 seconds
     
     logger.info(`ImageDownloader initialized with base path: ${this.basePath}`);
@@ -38,7 +43,7 @@ class ImageDownloader {
       responseType: 'arraybuffer',
       timeout: this.timeout,
       headers: {
-        'User-Agent': 'nuLMD/1.0 (https://github.com/ofernander/nuLMD)',
+        'User-Agent': USER_AGENT,
         'Accept': 'image/*,*/*'
       },
       maxRedirects: 5,
@@ -197,7 +202,8 @@ class ImageDownloader {
               cached_at = NOW(),
               local_path = $1,
               cache_failed = false,
-              cache_failed_reason = null
+              cache_failed_reason = null,
+              download_failures = 0
           WHERE id = $2
         `, [localPath, imageId]);
         
@@ -226,12 +232,17 @@ class ImageDownloader {
     }
     
     // All retries exhausted - mark as failed
+    // A refusal that trying again will not change (not found, forbidden, not an image) is never retried by the queue
+    const status = lastError.response && lastError.response.status;
+    const permanent = [400, 401, 403, 404, 410].includes(status) || /Invalid content-type/.test(lastError.message);
     await database.query(`
       UPDATE images
       SET cache_failed = true,
-          cache_failed_reason = $1
+          cache_failed_reason = $1,
+          download_failures = CASE WHEN $3 THEN $4 ELSE download_failures + 1 END,
+          last_failed_at = NOW()
       WHERE id = $2
-    `, [lastError.message, imageId]);
+    `, [lastError.message, imageId, permanent, MAX_AUTO_RETRIES]);
     
     // 404 is normal - not all albums have cover art
     if (lastError.response && lastError.response.status === 404) {

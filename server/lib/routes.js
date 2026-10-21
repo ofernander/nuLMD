@@ -1,15 +1,19 @@
 const express = require('express');
 const router = express.Router();
+const { createKeyRouter } = require('./mbWs/keyRoutes');
 const { getRequestLog } = require('./request');
 const { registry } = require('./providerRegistry');
 const config = require('./config');
-const cache = require('./cache');
+const { resolveMusicBrainzSources, sanitizeSources, normalizeUrl, isOfficialUrl } = require('./mbSources');
 const { logger, getRecentLogs, resolveLevel } = require('./logger');
 const metaHandler = require('./metaHandler');
 const lidarr = require('./lidarr');
 const backgroundJobQueue = require('./backgroundJobQueue');
 const lidarrClient = require('./lidarrClient');
+const { USER_AGENT } = require('./userAgent');
 const database = require('../sql/database');
+const blocklist = require('./blocklist');
+const metadataClear = require('./metadataClear');
 const multer = require('multer');
 const fs = require('fs').promises;
 const path = require('path');
@@ -40,12 +44,6 @@ async function getDirSizeBytes(dirPath) {
     });
   });
 }
-
-// MusicBrainz special entities — never fully fetch these
-const BLOCKED_ARTIST_MBIDS = new Set([
-  '89ad4ac3-39f7-470e-963a-56509c546377', // Various Artists
-  'fe5b7087-438f-4e6e-bf3d-4a5b65e8d8b6', // Various Artists (alt)
-]);
 
 // API version
 router.get('/version', (req, res) => {
@@ -127,7 +125,15 @@ router.get('/stats', async (req, res, next) => {
         tracks: parseInt(dbStats.track_count),
         images: parseInt(dbStats.cached_images),
         images_mb: Math.round(imageDirBytes / 1024 / 1024 * 10) / 10,
-        size_mb: Math.round(parseInt(dbStats.db_size_bytes) / 1024 / 1024)
+        size_mb: Math.round(parseInt(dbStats.db_size_bytes) / 1024 / 1024),
+        // Where each artist's catalog stands: checked against MusicBrainz, older (renewed at its TTL), taken from an
+        // upstream while MusicBrainz was down (provisional), or not fetched yet
+        catalogs: {
+          verified: parseInt(dbStats.catalogs_verified),
+          unverified: parseInt(dbStats.catalogs_unverified),
+          provisional: parseInt(dbStats.catalogs_provisional),
+          incomplete: parseInt(dbStats.catalogs_incomplete)
+        }
       },
       jobs: {
         active: jobStats.processing || 0,
@@ -181,13 +187,10 @@ router.get('/artist/:mbid', async (req, res, next) => {
   try {
     const { mbid } = req.params;
 
-    // Block special MusicBrainz entities from full processing
-    if (BLOCKED_ARTIST_MBIDS.has(mbid)) {
-      logger.info(`Blocked artist ${mbid} (special MB entity), returning minimal response`);
-      const formatted = await lidarr.formatArtist(mbid).catch(() => ({
-        Id: mbid, ArtistName: 'Various Artists', Status: 'active',
-        Images: [], Albums: [], Links: [], Genres: [], Tags: []
-      }));
+    // Blocked artists (the special MusicBrainz entities and the user's) are never fully processed
+    if (blocklist.isBlocked('artist', mbid)) {
+      logger.info(`Blocked artist ${mbid}, returning minimal response`);
+      const formatted = await lidarr.formatArtist(mbid).catch(async () => lidarr.blockedArtist(mbid, await blocklist.nameOf('artist', mbid)));
       return res.json(formatted);
     }
 
@@ -195,7 +198,7 @@ router.get('/artist/:mbid', async (req, res, next) => {
     const artist = await database.getArtist(mbid);
 
     if (artist) {
-      // Artist exists - check if TTL expired (7 days)
+      // Artist exists - check if TTL expired (configurable, default 30 days)
       const now = new Date();
       const ttlExpired = artist.ttl_expires_at && new Date(artist.ttl_expires_at) < now;
       
@@ -234,22 +237,16 @@ router.get('/artist/:mbid', async (req, res, next) => {
 router.get('/album/:mbid', async (req, res, next) => {
   try {
     const { mbid } = req.params;
+    if (blocklist.isBlocked('release_group', mbid)) return res.status(404).json({ error: 'Not found' });
 
     const formatted = await lidarr.formatAlbum(mbid);
 
-    const rgCheck = await database.getReleaseGroup(mbid);
-    if (rgCheck && !rgCheck.overview) {
-      const wikiDone = await database.query(
-        `SELECT 1 FROM metadata_jobs WHERE job_type = 'fetch_album_wiki' AND entity_mbid = $1 AND status = 'completed' LIMIT 1`,
-        [mbid]
-      );
-      if (wikiDone.rows.length === 0) {
-        await backgroundJobQueue.queueJob('fetch_album_wiki', 'release_group', mbid, 1);
-      } else {
-        logger.info(`Wiki already fetched for album ${mbid}, skipping`);
-      }
+    // Only what still has something to look up is queued: the row itself remembers an overview, images, or a recorded
+    // "nothing found" (the job table is pruned, so a finished job is not proof of anything)
+    if ((await backgroundJobQueue.albumsNeedingWiki([mbid])).length > 0) {
+      await backgroundJobQueue.queueJob('fetch_album_wiki', 'release_group', mbid, 1);
     }
-    if (backgroundJobQueue.hasAlbumImageProvider()) {
+    if (backgroundJobQueue.hasAlbumImageProvider() && (await backgroundJobQueue.albumsNeedingImages([mbid])).length > 0) {
       await backgroundJobQueue.queueJob('fetch_album_images', 'release_group', mbid, 1);
     }
 
@@ -290,20 +287,22 @@ router.get('/search/album', async (req, res, next) => {
 router.get('/config', (req, res) => {
   const cfg = config.getAll();
   // Resolve env vars so UI shows what's actually in use
-  if (cfg.providers?.musicbrainz && !cfg.providers.musicbrainz.baseUrl) {
-    cfg.providers.musicbrainz.baseUrl = process.env.MUSICBRAINZ_URL || '';
-  }
-  if (cfg.providers?.fanart && !cfg.providers.fanart.apiKey) {
-    cfg.providers.fanart.apiKey = process.env.FANART_API_KEY || '';
-  }
-  // Resolve lidarrIntegration env vars
-  if (cfg.lidarrIntegration) {
-    if (!cfg.lidarrIntegration.url) {
-      cfg.lidarrIntegration.url = process.env.LIDARR_URL || '';
+  if (cfg.providers?.musicbrainz) {
+    if (!cfg.providers.musicbrainz.baseUrl) {
+      cfg.providers.musicbrainz.baseUrl = process.env.MUSICBRAINZ_URL || '';
     }
-    if (!cfg.lidarrIntegration.apiKey) {
-      cfg.lidarrIntegration.apiKey = process.env.LIDARR_API_KEY || '';
-    }
+    // Effective source list: UI-added + compose-seeded (flagged fromEnv, read-only in the UI)
+    cfg.providers.musicbrainz.sources = resolveMusicBrainzSources(config.get('providers.musicbrainz', {}));
+  }
+  // Fanart and the Lidarr integration are shown as they are in use: environment values win, "enabled" is whether they have
+  // what they need, and the *FromEnv marks tell the UI which fields can only be changed in compose. Copies, so what is
+  // masked below is never the live configuration.
+  {
+    const fanart = config.fanartSettings();
+    cfg.providers = { ...cfg.providers, fanart: { ...(cfg.providers && cfg.providers.fanart), apiKey: fanart.apiKey, enabled: fanart.enabled, apiKeyFromEnv: fanart.apiKeyFromEnv } };
+    const lidarrSettings = config.lidarrSettings();
+    cfg.lidarrIntegration = { ...cfg.lidarrIntegration, url: lidarrSettings.url, apiKey: lidarrSettings.apiKey, enabled: lidarrSettings.enabled,
+      urlFromEnv: lidarrSettings.urlFromEnv, apiKeyFromEnv: lidarrSettings.apiKeyFromEnv };
   }
   // Show masked API keys (first half + ***) so user knows if configured
   if (cfg.providers) {
@@ -334,6 +333,12 @@ router.get('/config', (req, res) => {
 router.post('/config', async (req, res, next) => {
   try {
     const updates = req.body;
+
+    // Compose-seeded sources live in the environment, never in config.yml
+    const mbSources = updates.providers?.musicbrainz?.sources;
+    if (Array.isArray(mbSources)) {
+      updates.providers.musicbrainz.sources = mbSources.filter(s => !s.fromEnv);
+    }
     
     // Update configuration
     Object.keys(updates).forEach(key => {
@@ -349,17 +354,6 @@ router.post('/config', async (req, res, next) => {
   }
 });
 
-// Cache management
-router.get('/cache/stats', (req, res) => {
-  const stats = cache.getStats();
-  res.json(stats);
-});
-
-router.post('/cache/flush', (req, res) => {
-  cache.flush();
-  res.json({ success: true, message: 'Cache flushed' });
-});
-
 // Provider status
 router.get('/providers', (req, res) => {
   const providers = registry.getActiveProviderNames().map(name => {
@@ -367,11 +361,151 @@ router.get('/providers', (req, res) => {
     return {
       name: name,
       type: provider.name,
-      configured: true
+      configured: true,
+      ...(typeof provider.getStatus === 'function' ? { sources: provider.getStatus() } : {})
     };
   });
   
   res.json(providers);
+});
+
+// ─── Metadata sources (MusicBrainz servers + Lidarr metadata upstreams) ──────────────
+
+// Configured sources merged with live pool state (breaker, in-flight, served/failed)
+router.get('/sources', (req, res) => {
+  const resolved = resolveMusicBrainzSources(config.get('providers.musicbrainz', {}) || {});
+  const mb = registry.getProvider('musicbrainz');
+  const live = new Map(
+    (mb && typeof mb.getStatus === 'function' ? mb.getStatus() : [])
+      .map(s => [normalizeUrl(s.url).toLowerCase(), s])
+  );
+  res.json({
+    sources: resolved.map(s => ({ ...s, live: live.get(normalizeUrl(s.url).toLowerCase()) || null })),
+    workers: { mb: backgroundJobQueue.maxMbWorkers }
+  });
+});
+
+// Replace the UI-managed source list and apply it without a restart
+router.put('/sources', async (req, res, next) => {
+  try {
+    const { sources, errors, adjusted } = sanitizeSources((req.body || {}).sources);
+    if (errors.length) return res.status(400).json({ error: errors.join('; ') });
+
+    const previous = {
+      sources: config.get('providers.musicbrainz.sources', []),
+      baseUrl: config.get('providers.musicbrainz.baseUrl', '')
+    };
+    // A legacy single baseUrl is migrated into the list by the editor, so clear it here
+    config.set('providers.musicbrainz.sources', sources);
+    config.set('providers.musicbrainz.baseUrl', '');
+
+    try {
+      await registry.reloadMusicBrainz();
+    } catch (error) {
+      config.set('providers.musicbrainz.sources', previous.sources);
+      config.set('providers.musicbrainz.baseUrl', previous.baseUrl);
+      return res.status(400).json({ error: `Could not apply sources: ${error.message}` });
+    }
+    await config.save();
+    backgroundJobQueue.refreshMbCapacity();
+    res.json({ success: true, applied: true, adjusted });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Quick reachability check for a source before saving it
+router.post('/sources/test', async (req, res) => {
+  const { url: rawUrl, type } = req.body || {};
+  const url = normalizeUrl(rawUrl);
+  if (!/^https?:\/\/[^\s/]+(\/\S*)?$/i.test(url)) {
+    return res.json({ ok: false, detail: 'URL must start with http:// or https://' });
+  }
+  const lmd = type === 'lmd';
+  if (lmd && isOfficialUrl(url)) return res.json({ ok: false, detail: 'musicbrainz.org is a MusicBrainz source, not an LMD upstream' });
+
+  const axios = require('axios');
+  const radiohead = 'a74b1b7f-71a5-4011-9441-d0b5e4122711';
+  const started = Date.now();
+  try {
+    const response = await axios.get(`${url}/artist/${radiohead}`, {
+      params: lmd ? undefined : { fmt: 'json' },
+      timeout: 10000,
+      headers: { 'User-Agent': USER_AGENT }
+    });
+    const name = lmd ? response.data?.artistname : response.data?.name;
+    const ms = Date.now() - started;
+    if (!name) return res.json({ ok: false, ms, detail: `Responded, but not like a ${lmd ? 'Lidarr metadata server' : 'MusicBrainz server'}` });
+    res.json({ ok: true, ms, detail: `${name} in ${ms}ms` });
+  } catch (error) {
+    const ms = Date.now() - started;
+    const status = error.response?.status;
+    res.json({ ok: false, ms, detail: status ? `HTTP ${status}` : (error.code || error.message) });
+  }
+});
+
+// ─── Idle-time MusicBrainz backfill ───────────────────────────────────────────────
+
+router.get('/backfill', async (req, res, next) => {
+  try {
+    const counts = await database.query(`
+      SELECT
+        (SELECT COUNT(*)::int FROM artists WHERE needs_mb_backfill) AS artists,
+        (SELECT COUNT(*)::int FROM release_groups WHERE needs_mb_backfill) AS albums,
+        (SELECT COUNT(*)::int FROM metadata_jobs
+           WHERE job_type IN ('backfill_artist', 'backfill_album') AND status IN ('pending', 'processing')) AS queued
+    `);
+    const row = counts.rows[0] || {};
+    res.json({
+      idle: await backgroundJobQueue.isIdle(),
+      running: backgroundJobQueue.backfillWorkers,
+      artists: Number(row.artists) || 0,
+      albums: Number(row.albums) || 0,
+      queued: Number(row.queued) || 0
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ─── Raw MusicBrainz archive ───────────────────────────────────────────────────
+
+router.get('/archive', async (req, res, next) => {
+  try {
+    const stats = await database.query(`
+      SELECT entity_type, COUNT(*)::int AS entries FROM mb_raw_archive GROUP BY entity_type
+    `);
+    const size = await database.query(`SELECT pg_total_relation_size('mb_raw_archive')::bigint AS bytes`);
+    const byType = {};
+    for (const row of stats.rows) byType[row.entity_type] = Number(row.entries) || 0;
+    res.json({
+      entries: byType,
+      total: Object.values(byType).reduce((a, b) => a + b, 0),
+      bytes: Number(size.rows[0] && size.rows[0].bytes) || 0
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Empties the archive. The tables keep working: it is only a rebuild source.
+router.post('/archive/clear', async (req, res, next) => {
+  try {
+    await database.query('TRUNCATE mb_raw_archive');
+    res.json({ success: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Queue flagged rows now; the worker still waits for idle before running them
+router.post('/backfill/sweep', async (req, res, next) => {
+  try {
+    const queued = await backgroundJobQueue.sweepBackfill();
+    res.json({ success: true, queued });
+  } catch (error) {
+    next(error);
+  }
 });
 
 // Log level endpoints
@@ -437,8 +571,8 @@ router.get('/metadata/artist/:mbid', async (req, res, next) => {
         rg.secondary_types,
         rg.first_release_date,
         rg.last_updated_at,
-        COUNT(DISTINCT r.mbid) as release_count,
-        COUNT(DISTINCT t.mbid) as track_count,
+        COUNT(r.mbid) as release_count,
+        COALESCE(SUM(r.track_count), 0) as track_count,
         (
           SELECT r2.status
           FROM releases r2
@@ -451,7 +585,6 @@ router.get('/metadata/artist/:mbid', async (req, res, next) => {
       FROM release_groups rg
       JOIN artist_release_groups arg ON arg.release_group_mbid = rg.mbid
       LEFT JOIN releases r ON r.release_group_mbid = rg.mbid
-      LEFT JOIN tracks t ON t.release_mbid = r.mbid
       WHERE arg.artist_mbid = $1
       GROUP BY rg.mbid, rg.title, rg.primary_type, rg.secondary_types, rg.first_release_date, rg.last_updated_at
       ORDER BY rg.first_release_date DESC NULLS LAST
@@ -470,29 +603,34 @@ router.get('/metadata/album-tracks/:mbid', async (req, res, next) => {
   try {
     const { mbid } = req.params;
     
-    // Query database for tracks from ONLY the first release of this album
+    // The tracks of ONLY the first release of this album, read from the tracklist the release itself holds
     const result = await database.query(`
-      SELECT 
-        t.mbid,
-        t.title,
-        t.position,
-        t.medium_number,
-        t.length_ms
-      FROM tracks t
-      WHERE t.release_mbid = (
-        SELECT r.mbid
-        FROM releases r
-        WHERE r.release_group_mbid = $1
-        ORDER BY 
-          CASE WHEN r.status = 'Official' THEN 0 ELSE 1 END,
-          r.release_date ASC NULLS LAST
-        LIMIT 1
-      )
-      ORDER BY t.medium_number, t.position
+      SELECT r.media
+      FROM releases r
+      WHERE r.release_group_mbid = $1
+      ORDER BY
+        CASE WHEN r.status = 'Official' THEN 0 ELSE 1 END,
+        r.release_date ASC NULLS LAST
+      LIMIT 1
     `, [mbid]);
-    
+
+    const media = result.rows[0] && result.rows[0].media;
+    const tracks = [];
+    for (const medium of Array.isArray(media) ? media : []) {
+      for (const track of medium.tracks || []) {
+        tracks.push({
+          mbid: track.id,
+          title: track.title || '',
+          position: Number(track.position) || 0,
+          medium_number: medium.position,
+          length_ms: track.length || null
+        });
+      }
+    }
+    tracks.sort((a, b) => (a.medium_number - b.medium_number) || (a.position - b.position));
+
     res.json({
-      tracks: result.rows
+      tracks
     });
   } catch (error) {
     next(error);
@@ -617,6 +755,228 @@ router.delete('/images/:id', async (req, res, next) => {
   }
 });
 
+// Trim locally-cached images for artists/albums no longer in Lidarr.
+// Rule: if an image's artist is still in Lidarr, keep it (including user uploads);
+// if the artist has left Lidarr, remove everything for it (uploads included).
+// For albums whose artist is still present, auto-fetched art is trimmed only when
+// the specific album isn't in Lidarr's set (user uploads for present artists are kept).
+router.post('/images/prune-not-in-lidarr', async (req, res, next) => {
+  try {
+    if (!lidarrClient.enabled) {
+      return res.status(400).json({ success: false, error: 'Lidarr integration not enabled' });
+    }
+    // Re-init + probe with a one-shot retry so a transient blip doesn't fail the run.
+    if (!(await lidarrClient.ensureConnected())) {
+      return res.status(502).json({ success: false, error: 'Lidarr unreachable — aborted, nothing deleted' });
+    }
+
+    // Artist set — abort if unreachable or empty so a bad map can never wipe everything.
+    const artistRes = await lidarrClient.refreshArtistMap();
+    if (!artistRes.reachable) {
+      return res.status(502).json({ success: false, error: 'Lidarr unreachable — aborted, nothing deleted' });
+    }
+    const artistIds = lidarrClient.getArtistForeignIds();
+    if (artistIds.size === 0) {
+      return res.status(400).json({ success: false, error: 'Lidarr returned 0 artists — aborted as a safety guard' });
+    }
+
+    // Album set — if this fetch fails we skip per-album trimming rather than guess.
+    const albumRes = await lidarrClient.getAlbumForeignIds();
+    const albumIds = albumRes.ids;
+    const albumTrimEnabled = albumRes.reachable;
+
+    // release_group -> [artist_mbid,...] so we can tell if an album's artist is still in Lidarr.
+    const rgArtists = new Map();
+    const argRows = await database.query(
+      `SELECT release_group_mbid, array_agg(artist_mbid) AS artists
+       FROM artist_release_groups GROUP BY release_group_mbid`
+    );
+    for (const r of argRows.rows) rgArtists.set(r.release_group_mbid, r.artists || []);
+
+    const artistPresentFor = (img) => {
+      if (img.entity_type === 'artist') return artistIds.has(img.entity_mbid);
+      const owners = rgArtists.get(img.entity_mbid) || [];
+      return owners.some(a => artistIds.has(a));
+    };
+
+    const { rows } = await database.query(
+      `SELECT id, entity_type, entity_mbid, local_path, user_uploaded FROM images`
+    );
+
+    let deletedArtists = 0, deletedAlbums = 0, bytesFreed = 0;
+    const idsToDelete = [];
+
+    for (const img of rows) {
+      const artistPresent = artistPresentFor(img);
+      let del = false;
+      if (!artistPresent) {
+        // Artist gone from Lidarr — remove everything for it, user uploads included.
+        del = true;
+      } else if (img.entity_type === 'release_group' && !img.user_uploaded && albumTrimEnabled) {
+        // Artist still present but this specific album isn't tracked — trim auto-fetched art only.
+        del = !albumIds.has(img.entity_mbid);
+      }
+      if (!del) continue;
+
+      if (img.entity_type === 'artist') deletedArtists++; else deletedAlbums++;
+      idsToDelete.push(img.id);
+      if (img.local_path) {
+        try {
+          const st = await fs.stat(img.local_path);
+          bytesFreed += st.size;
+          await fs.unlink(img.local_path);
+        } catch (err) {
+          if (err.code !== 'ENOENT') logger.warn(`prune: could not delete ${img.local_path}: ${err.message}`);
+        }
+      }
+    }
+
+    if (idsToDelete.length > 0) {
+      await database.query('DELETE FROM images WHERE id = ANY($1)', [idsToDelete]);
+    }
+
+    logger.info(`prune-not-in-lidarr: removed ${idsToDelete.length} images (${deletedArtists} artist, ${deletedAlbums} album), freed ${bytesFreed} bytes; albumTrim=${albumTrimEnabled}`);
+    res.json({ success: true, deleted: idsToDelete.length, artists: deletedArtists, albums: deletedAlbums, bytesFreed, albumTrimEnabled });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ─── Clearing cached metadata, and the blocklist ──────────────────────────────────────────────────────────────────
+
+const isUuid = v => blocklist.UUID.test(String(v));
+
+// Lidarr's artist and album sets for a trim. Anything short of two sets that can be trusted stops the run: it never guesses.
+async function lidarrSetsForTrim() {
+  if (!lidarrClient.enabled) return { error: [400, 'Lidarr integration not enabled'] };
+  if (!(await lidarrClient.ensureConnected())) return { error: [502, 'Lidarr unreachable — aborted, nothing deleted'] };
+  const artistRes = await lidarrClient.refreshArtistMap();
+  if (!artistRes.reachable) return { error: [502, 'Lidarr unreachable — aborted, nothing deleted'] };
+  const artistIds = lidarrClient.getArtistForeignIds();
+  if (artistIds.size === 0) return { error: [400, 'Lidarr returned 0 artists — aborted as a safety guard'] };
+  const albumRes = await lidarrClient.getAlbumForeignIds();
+  if (!albumRes.reachable) return { error: [502, 'Lidarr album list unavailable — aborted, nothing deleted'] };
+  if (albumRes.ids.size === 0) return { error: [400, 'Lidarr returned 0 albums — aborted as a safety guard'] };
+  return { artistIds, albumIds: albumRes.ids };
+}
+
+// Is this entity in Lidarr's library? 'off' (integration disabled: nothing to check against), 'in', 'out', or 'unknown'
+async function lidarrMembership(type, mbid) {
+  if (!lidarrClient.enabled) return 'off';
+  if (type === 'artist') {
+    const known = await lidarrClient.isInLidarr(mbid);
+    return known === true ? 'in' : known === false ? 'out' : 'unknown';
+  }
+  if (type === 'release_group') {
+    if (!(await lidarrClient.ensureConnected())) return 'unknown';
+    const albums = await lidarrClient.getAlbumForeignIds();
+    if (!albums.reachable) return 'unknown';
+    return albums.ids.has(mbid) ? 'in' : 'out';
+  }
+  return 'off';   // a single release is not something Lidarr's sets name
+}
+
+const clearOf = { artist: metadataClear.clearArtist, release_group: metadataClear.clearReleaseGroup, release: metadataClear.clearRelease };
+const nameQuery = {
+  artist: 'SELECT name FROM artists WHERE mbid = $1',
+  release_group: 'SELECT title AS name FROM release_groups WHERE mbid = $1',
+  release: 'SELECT title AS name FROM releases WHERE mbid = $1'
+};
+
+// What clearing an artist or a release group would remove, for the confirm dialog
+router.get('/metadata/clear-preview/:type/:mbid', async (req, res, next) => {
+  try {
+    const { type, mbid } = req.params;
+    if (!['artist', 'release_group'].includes(type) || !isUuid(mbid)) return res.status(400).json({ success: false, error: 'Invalid request' });
+    const stats = await clearOf[type](mbid.toLowerCase(), { dryRun: true });
+    res.json({ success: true, ...stats, lidarr: await lidarrMembership(type, mbid.toLowerCase()) });
+  } catch (error) { next(error); }
+});
+
+router.delete('/metadata/artist/:mbid', async (req, res, next) => {
+  try {
+    if (!isUuid(req.params.mbid)) return res.status(400).json({ success: false, error: 'Invalid mbid' });
+    const stats = await metadataClear.clearArtist(req.params.mbid.toLowerCase());
+    res.json({ success: true, ...stats });
+  } catch (error) {
+    if (error.status) return res.status(error.status).json({ success: false, error: error.message });
+    next(error);
+  }
+});
+
+router.delete('/metadata/album/:mbid', async (req, res, next) => {
+  try {
+    if (!isUuid(req.params.mbid)) return res.status(400).json({ success: false, error: 'Invalid mbid' });
+    const stats = await metadataClear.clearReleaseGroup(req.params.mbid.toLowerCase());
+    res.json({ success: true, ...stats });
+  } catch (error) {
+    if (error.status) return res.status(error.status).json({ success: false, error: error.message });
+    next(error);
+  }
+});
+
+// Trim the stored metadata of artists Lidarr does not have (same safeguards as the image trim; `dryRun` only counts).
+// Artists and release groups Lidarr has are kept, and so is the name of any artist still credited on an album that stays.
+router.post('/metadata/prune-not-in-lidarr', async (req, res, next) => {
+  try {
+    const sets = await lidarrSetsForTrim();
+    if (sets.error) return res.status(sets.error[0]).json({ success: false, error: sets.error[1] });
+    const dryRun = !!(req.body && req.body.dryRun);
+    const stats = await metadataClear.trimNotInLidarr({ lidarrArtistIds: sets.artistIds, lidarrAlbumIds: sets.albumIds, dryRun });
+    logger.info(`prune metadata not in Lidarr${dryRun ? ' (dry run)' : ''}: ${JSON.stringify(stats)}`);
+    res.json({ success: true, dryRun, ...stats });
+  } catch (error) { next(error); }
+});
+
+router.get('/blocklist', async (req, res, next) => {
+  try { res.json(await blocklist.list()); } catch (error) { next(error); }
+});
+
+// Block an artist, release group or release, and (unless `clear: false`) remove what is held for it.
+// An artist or album in Lidarr's library is refused (a library artist sent no albums could cost Lidarr its albums), and so is
+// one Lidarr cannot confirm about while the integration is on.
+router.post('/blocklist', async (req, res, next) => {
+  try {
+    const { type, name, reason } = req.body || {};
+    const mbid = String((req.body && req.body.mbid) || '').toLowerCase();
+    const clear = !(req.body && req.body.clear === false);
+    if (!blocklist.TYPES.includes(type) || !isUuid(mbid)) return res.status(400).json({ success: false, error: 'A type (artist, release_group, release) and a valid mbid are needed' });
+    if (blocklist.isBuiltin(mbid) && type === 'artist') return res.status(400).json({ success: false, error: 'Already blocked (built in)' });
+
+    const where = await lidarrMembership(type, mbid);
+    if (where === 'in') return res.status(409).json({ success: false, error: `This ${type.replace('_', ' ')} is in Lidarr's library: remove it from Lidarr first` });
+    if (where === 'unknown') return res.status(409).json({ success: false, error: 'Lidarr cannot confirm whether this is in its library right now: nothing blocked' });
+
+    const label = name || ((await database.query(nameQuery[type], [mbid])).rows[0] || {}).name || null;
+    await blocklist.add({ type, mbid, name: label, reason });
+    let cleared = null;
+    if (clear) {
+      try {
+        cleared = await clearOf[type](mbid, { ignoreJobs: true, forceDeleteRows: true });
+      } catch (error) {
+        logger.error(`Blocked ${type} ${mbid}, but clearing it failed: ${error.message}`);
+        return res.status(500).json({ success: false, blocked: true, error: `Blocked, but clearing its data failed: ${error.message}` });
+      }
+    }
+    res.json({ success: true, blocked: true, cleared });
+  } catch (error) {
+    if (error.status) return res.status(error.status).json({ success: false, error: error.message });
+    next(error);
+  }
+});
+
+router.delete('/blocklist/:type/:mbid', async (req, res, next) => {
+  try {
+    const { type, mbid } = req.params;
+    if (!blocklist.TYPES.includes(type) || !isUuid(mbid)) return res.status(400).json({ success: false, error: 'Invalid request' });
+    const removed = await blocklist.remove(type, mbid);
+    res.json({ success: true, removed });
+  } catch (error) {
+    if (error.status) return res.status(error.status).json({ success: false, error: error.message });
+    next(error);
+  }
+});
+
 // Image fetch endpoints — queue provider fetch jobs (user-uploaded images protected inside _storeImageUrls)
 router.post('/images/fetch/artist-albums/:mbid', async (req, res, next) => {
   try {
@@ -720,7 +1080,7 @@ router.post('/refresh/artist/:mbid', async (req, res, next) => {
     
     await metaHandler.refreshArtist(mbid);
     
-    res.json({ success: true, message: `Artist ${mbid} refreshed successfully` });
+    res.json({ success: true, message: `Artist ${mbid} refresh queued` });
   } catch (error) {
     next(error);
   }
@@ -812,18 +1172,16 @@ router.get('/jobs/recent', async (req, res, next) => {
           END::bigint as release_count,
           CASE
             WHEN j.entity_type = 'artist' THEN
-              (SELECT COUNT(DISTINCT t.recording_mbid) FROM tracks t
-               JOIN releases r2 ON r2.mbid = t.release_mbid
-               JOIN release_groups rg4 ON rg4.mbid = r2.release_group_mbid
-               JOIN artist_release_groups arg3 ON arg3.release_group_mbid = rg4.mbid
+              (SELECT COALESCE(SUM(r2.track_count), 0) FROM releases r2
+               JOIN artist_release_groups arg3 ON arg3.release_group_mbid = r2.release_group_mbid
                WHERE arg3.artist_mbid = j.entity_mbid)
             ELSE
-              (SELECT COUNT(DISTINCT t.recording_mbid) FROM tracks t
-               JOIN releases r3 ON r3.mbid = t.release_mbid
+              (SELECT COALESCE(SUM(r3.track_count), 0) FROM releases r3
                WHERE r3.release_group_mbid = j.entity_mbid)
           END::bigint as track_count,
           NULL::text as cover_type,
-          NULL::text as image_provider
+          NULL::text as image_provider,
+          j.metadata->>'via' as via
         FROM (
           SELECT *
           FROM metadata_jobs
@@ -865,7 +1223,8 @@ router.get('/jobs/recent', async (req, res, next) => {
           END as artist_name,
           0::bigint as album_count, 0::bigint as release_count, 0::bigint as track_count,
           i.cover_type,
-          i.provider as image_provider
+          i.provider as image_provider,
+          NULL::text as via
         FROM images i
         LEFT JOIN artists a2 ON a2.mbid = i.entity_mbid
         LEFT JOIN release_groups rg2 ON rg2.mbid = i.entity_mbid
@@ -895,7 +1254,8 @@ router.get('/jobs/recent', async (req, res, next) => {
             END as artist_name,
             0::bigint as album_count, 0::bigint as release_count, 0::bigint as track_count,
             i.cover_type,
-            i.provider as image_provider
+            i.provider as image_provider,
+            NULL::text as via
           FROM images i
           LEFT JOIN artists a3 ON a3.mbid = i.entity_mbid
           LEFT JOIN release_groups rg3 ON rg3.mbid = i.entity_mbid
@@ -927,7 +1287,8 @@ router.get('/jobs/recent', async (req, res, next) => {
           END as artist_name,
           0::bigint as album_count, 0::bigint as release_count, 0::bigint as track_count,
           i.cover_type,
-          i.provider as image_provider
+          i.provider as image_provider,
+          NULL::text as via
         FROM images i
         LEFT JOIN artists a4 ON a4.mbid = i.entity_mbid
         LEFT JOIN release_groups rg4 ON rg4.mbid = i.entity_mbid
@@ -949,6 +1310,28 @@ router.get('/jobs/recent', async (req, res, next) => {
     `;
 
     const result = await database.query(sql);
+
+    // What the card needs to show about a job's retries, and for an artist's catalog job where the catalog stands
+    const jobIds = result.rows.filter(r => r.job_type !== 'image_download').map(r => r.id);
+    if (jobIds.length > 0) {
+      const extra = await database.query(`
+        SELECT j.id, j.attempts, j.max_attempts, j.run_after,
+               CASE WHEN j.job_type <> 'fetch_artist_albums' THEN NULL
+                    WHEN a.catalog_provisional THEN 'provisional'
+                    WHEN a.catalog_verified_at IS NOT NULL THEN 'verified'
+                    WHEN a.catalog_complete_at IS NOT NULL THEN 'unverified'
+                    ELSE 'incomplete' END AS catalog_state
+        FROM metadata_jobs j LEFT JOIN artists a ON a.mbid = j.entity_mbid
+        WHERE j.id = ANY($1)
+      `, [jobIds]);
+      const byId = new Map(extra.rows.map(r => [String(r.id), r]));
+      for (const row of result.rows) {
+        if (row.job_type === 'image_download') continue;
+        const more = byId.get(String(row.id));
+        if (more) Object.assign(row, { attempts: more.attempts, max_attempts: more.max_attempts, run_after: more.run_after, catalog_state: more.catalog_state });
+      }
+    }
+
     res.json(result.rows);
   } catch (error) {
     next(error);
@@ -1054,10 +1437,14 @@ router.get('/logs/tail', (req, res) => {
   res.json(filteredLogs);
 });
 
+// API keys for the MusicBrainz-compatible /ws/2 endpoint (made and removed from the web UI)
+router.use('/ws2/keys', createKeyRouter(() => require('./mbWs/services').keys()));
+
 // Recent requests feed
+// ?direction=inbound (who asked nuLMD) or ?direction=outbound (what nuLMD asked others and got back); both if omitted
 router.get('/requests/recent', (req, res) => {
-    const last = getRequestLog().slice(-50).reverse();
-    res.json(last);
+    const direction = ['inbound', 'outbound'].includes(req.query.direction) ? req.query.direction : null;
+    res.json(getRequestLog(direction).slice(-50).reverse());
 });
 
 module.exports = router;

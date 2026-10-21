@@ -1,8 +1,8 @@
 const { Pool } = require('pg');
-const fs = require('fs').promises;
-const path = require('path');
 const { logger } = require('../lib/logger');
 const config = require('../lib/config');
+const { resolveSettings, ensureDatabase } = require('./connection');
+const { migrate } = require('./migrate');
 
 class Database {
   constructor() {
@@ -10,11 +10,11 @@ class Database {
   }
 
   async initialize() {
-    const dbConfig = config.get('postgres');
-    
-    logger.info('Initializing database connection...');
-    
-    // Create connection pool
+    // Environment variables win over config.yml (see connection.js); create the database if it's new
+    const dbConfig = resolveSettings(config.get('postgres'));
+    logger.info(`Initializing database connection (${dbConfig.host}:${dbConfig.port}/${dbConfig.database})...`);
+    await ensureDatabase(dbConfig, { log: msg => logger.info(msg) });
+
     this.pool = new Pool({
       host: dbConfig.host,
       port: dbConfig.port,
@@ -26,7 +26,6 @@ class Database {
       connectionTimeoutMillis: 2000,
     });
 
-    // Test connection
     try {
       const client = await this.pool.connect();
       logger.info('Database connection successful');
@@ -36,119 +35,23 @@ class Database {
       throw error;
     }
 
-    // Check if schema needs initialization
-    await this.ensureSchema();
+    await this.ensureSchema(dbConfig.database);
   }
 
-  async ensureSchema() {
+  // Applies any migration this database hasn't had yet; refuses a v4 database (see migrate.js)
+  async ensureSchema(databaseName) {
     logger.info('Checking database schema...');
-    
-    // Check if artists table exists
-    const result = await this.query(`
-      SELECT EXISTS (
-        SELECT FROM information_schema.tables 
-        WHERE table_schema = 'public' 
-        AND table_name = 'artists'
-      );
-    `);
-
-    const schemaExists = result.rows[0].exists;
-
-    if (!schemaExists) {
-      logger.info('Schema not found, initializing database...');
-      await this.runMigrations();
-    } else {
-      logger.info('Schema already exists');
-      await this.runColumnMigrations();
-    }
-  }
-
-  async runColumnMigrations() {
-    logger.info('Checking column migrations...');
-    
-    await this.query(`
-      ALTER TABLE images 
-      ADD COLUMN IF NOT EXISTS user_uploaded BOOLEAN DEFAULT FALSE,
-      ADD COLUMN IF NOT EXISTS uploaded_at TIMESTAMP WITH TIME ZONE;
-    `);
-
-    await this.query(`
-      CREATE TABLE IF NOT EXISTS request_log (
-        id BIGSERIAL PRIMARY KEY,
-        timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-        direction VARCHAR(10) NOT NULL,
-        label TEXT NOT NULL,
-        detail TEXT NOT NULL,
-        status VARCHAR(10) NOT NULL DEFAULT 'ok'
-      )
-    `);
-
-    await this.query(`
-      CREATE INDEX IF NOT EXISTS idx_request_log_timestamp ON request_log(timestamp DESC)
-    `);
-
-    // Phase 1: Job tree support — add parent_job_id and root_artist_mbid
-    await this.query(`
-      ALTER TABLE metadata_jobs
-        ADD COLUMN IF NOT EXISTS parent_job_id BIGINT REFERENCES metadata_jobs(id) ON DELETE SET NULL,
-        ADD COLUMN IF NOT EXISTS root_artist_mbid UUID;
-    `);
-
-    // Drop old single unique constraint if it still exists (replaced by two partial indexes)
-    await this.query(`
-      ALTER TABLE metadata_jobs
-        DROP CONSTRAINT IF EXISTS unique_job;
-    `);
-
-    // Standalone jobs unique index (no root artist)
-    await this.query(`
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_standalone
-        ON metadata_jobs(job_type, entity_mbid)
-        WHERE root_artist_mbid IS NULL;
-    `);
-
-    // Tree jobs unique index (scoped to root artist)
-    await this.query(`
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_tree
-        ON metadata_jobs(job_type, entity_mbid, root_artist_mbid)
-        WHERE root_artist_mbid IS NOT NULL;
-    `);
-
-    await this.query(`
-      CREATE INDEX IF NOT EXISTS idx_metadata_jobs_parent
-        ON metadata_jobs(parent_job_id);
-    `);
-
-    await this.query(`
-      CREATE INDEX IF NOT EXISTS idx_metadata_jobs_root_artist
-        ON metadata_jobs(root_artist_mbid)
-        WHERE root_artist_mbid IS NOT NULL;
-    `);
-
-    await this.query(`
-      CREATE INDEX IF NOT EXISTS idx_metadata_jobs_created_at
-        ON metadata_jobs(created_at DESC);
-    `);
-    
-    logger.info('Column migrations complete');
-  }
-
-  async runMigrations() {
-    logger.info('Running database migrations...');
-    
-    const schemaPath = path.join(__dirname, 'schema.sql');
-    const schemaSql = await fs.readFile(schemaPath, 'utf8');
-    
+    const client = await this.pool.connect();
     try {
-      await this.query(schemaSql);
-      logger.info('Database schema created successfully');
-    } catch (error) {
-      logger.error('Failed to create schema:', error);
-      throw error;
+      const result = await migrate({
+        query: (text, params) => client.query(text, params),
+        database: databaseName,
+        log: msg => logger.info(msg)
+      });
+      logger.info(result.applied.length ? `Schema up to date (applied: ${result.applied.join(', ')})` : 'Schema up to date');
+    } finally {
+      client.release();
     }
-
-    // Run column migrations on fresh installs too
-    await this.runColumnMigrations();
   }
 
   async query(text, params) {
@@ -192,123 +95,39 @@ class Database {
   async updateArtistAccess(mbid) {
     await this.query(`
       UPDATE artists 
-      SET last_accessed_at = NOW(),
-          access_count = access_count + 1
+      SET last_accessed_at = NOW()
       WHERE mbid = $1
     `, [mbid]);
   }
 
-  async updateReleaseGroupAccess(mbid) {
-    await this.query(`
-      UPDATE release_groups 
-      SET last_accessed_at = NOW(),
-          access_count = access_count + 1
-      WHERE mbid = $1
-    `, [mbid]);
+  // An exact count of a big table is a full scan, and the dashboard asks every second: above this size the planner's own
+  // estimate (kept up to date by autovacuum, within a few percent) is used instead
+  async approximateCount(table) {
+    const estimate = (await this.query(`SELECT reltuples::bigint AS n FROM pg_class WHERE oid = to_regclass($1)`, [table])).rows[0];
+    if (estimate && Number(estimate.n) >= 100000) return Number(estimate.n);
+    return Number((await this.query(`SELECT COUNT(*) AS n FROM ${table}`)).rows[0].n);
   }
 
   async getStats() {
+    const trackCount = await this.approximateCount('recordings');
     const result = await this.query(`
       SELECT 
         (SELECT COUNT(*) FROM artists) as artist_count,
+        (SELECT COUNT(*) FROM artists WHERE catalog_provisional) as catalogs_provisional,
+        (SELECT COUNT(*) FROM artists WHERE NOT catalog_provisional AND catalog_verified_at IS NOT NULL) as catalogs_verified,
+        (SELECT COUNT(*) FROM artists WHERE NOT catalog_provisional AND catalog_verified_at IS NULL AND catalog_complete_at IS NOT NULL) as catalogs_unverified,
+        (SELECT COUNT(*) FROM artists WHERE catalog_complete_at IS NULL) as catalogs_incomplete,
         (SELECT COUNT(*) FROM release_groups) as album_count,
         (SELECT COUNT(*) FROM releases) as release_count,
-        (SELECT COUNT(*) FROM recordings) as track_count,
+        $1::bigint as track_count,
         (SELECT COUNT(*) FROM images WHERE cached = true) as cached_images,
         (SELECT pg_database_size(current_database())) as db_size_bytes
-    `);
+    `, [trackCount]);
     return result.rows[0];
   }
 
   // Fetch completion tracking methods
-  async markArtistFetchStarted(mbid) {
-    await this.query(`
-      UPDATE artists 
-      SET last_fetch_attempt = NOW(),
-          fetch_complete = FALSE
-      WHERE mbid = $1
-    `, [mbid]);
-    logger.info(`Marked artist ${mbid} fetch as started`);
-  }
-
-  async markArtistFetchComplete(mbid, releaseCount) {
-    await this.query(`
-      UPDATE artists 
-      SET fetch_complete = TRUE,
-          releases_fetched_count = $2,
-          last_updated_at = NOW()
-      WHERE mbid = $1
-    `, [mbid, releaseCount]);
-    logger.info(`Marked artist ${mbid} fetch as complete (${releaseCount} releases)`);
-  }
-
-  async artistNeedsRefresh(artist) {
-    if (!artist) return true;
-    
-    // Incomplete fetch - always refresh (job queue prevents duplicates)
-    if (!artist.fetch_complete) {
-      return true;
-    }
-    
-    // Complete fetch - check staleness (30 days)
-    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-    return new Date(artist.last_updated_at) < thirtyDaysAgo;
-  }
-
-  async getArtistReleaseMBIDs(artistMbid) {
-    const result = await this.query(`
-      SELECT DISTINCT r.mbid
-      FROM releases r
-      JOIN artist_release_groups arg ON r.release_group_mbid = arg.release_group_mbid
-      WHERE arg.artist_mbid = $1
-      ORDER BY r.mbid
-    `, [artistMbid]);
-    return result.rows.map(row => row.mbid);
-  }
-
   // Bulk refresh tracking methods
-  async getLastBulkRefresh() {
-    const result = await this.query(`
-      SELECT * FROM bulk_refresh_log
-      WHERE status = 'completed'
-      ORDER BY completed_at DESC
-      LIMIT 1
-    `);
-    return result.rows[0];
-  }
-
-  async startBulkRefresh() {
-    const result = await this.query(`
-      INSERT INTO bulk_refresh_log (started_at, status)
-      VALUES (NOW(), 'running')
-      RETURNING id
-    `);
-    return result.rows[0].id;
-  }
-
-  async completeBulkRefresh(id, artistsRefreshed) {
-    await this.query(`
-      UPDATE bulk_refresh_log
-      SET completed_at = NOW(),
-          status = 'completed',
-          artists_refreshed = $2
-      WHERE id = $1
-    `, [id, artistsRefreshed]);
-  }
-
-  async failBulkRefresh(id) {
-    await this.query(`
-      UPDATE bulk_refresh_log
-      SET status = 'failed'
-      WHERE id = $1
-    `, [id]);
-  }
-
-  async getAllArtistMbids() {
-    const result = await this.query('SELECT mbid FROM artists ORDER BY last_accessed_at DESC');
-    return result.rows.map(row => row.mbid);
-  }
-
   // Metadata browser methods
   async getAllArtistsWithCounts() {
     const result = await this.query(`
@@ -321,16 +140,23 @@ class Database {
         a.last_updated_at,
         a.ttl_expires_at,
         a.last_accessed_at,
-        COUNT(DISTINCT arg.release_group_mbid) as album_count,
-        COUNT(DISTINCT r.mbid) as release_count,
-        COUNT(DISTINCT t.mbid) as track_count,
+        a.catalog_complete_at,
+        a.catalog_verified_at,
+        a.catalog_provisional,
+        COALESCE(c.albums, 0)::bigint as album_count,
+        COALESCE(c.releases, 0)::bigint as release_count,
+        COALESCE(c.tracks, 0)::bigint as track_count,
         (SELECT COUNT(*) FROM images i WHERE i.entity_type = 'artist' AND i.entity_mbid = a.mbid AND i.cached = true) as artist_image_count,
         (SELECT COUNT(*) FROM images i2 WHERE i2.entity_type = 'release_group' AND i2.entity_mbid IN (SELECT arg2.release_group_mbid FROM artist_release_groups arg2 WHERE arg2.artist_mbid = a.mbid) AND i2.cached = true) as album_image_count
       FROM artists a
-      LEFT JOIN artist_release_groups arg ON arg.artist_mbid = a.mbid
-      LEFT JOIN releases r ON r.release_group_mbid = arg.release_group_mbid
-      LEFT JOIN tracks t ON t.release_mbid = r.mbid
-      GROUP BY a.mbid, a.name, a.sort_name, a.type, a.country, a.last_updated_at, a.ttl_expires_at, a.last_accessed_at
+      LEFT JOIN (
+        -- counted once per artist, from the releases themselves (a release holds its own tracklist and track count)
+        SELECT arg.artist_mbid, COUNT(DISTINCT arg.release_group_mbid) AS albums, COUNT(r.mbid) AS releases,
+               COALESCE(SUM(r.track_count), 0) AS tracks
+        FROM artist_release_groups arg
+        LEFT JOIN releases r ON r.release_group_mbid = arg.release_group_mbid
+        GROUP BY arg.artist_mbid
+      ) c ON c.artist_mbid = a.mbid
       ORDER BY a.last_accessed_at DESC NULLS LAST
     `);
     return result.rows;
@@ -341,12 +167,11 @@ class Database {
       SELECT 
         a.*,
         COUNT(DISTINCT arg.release_group_mbid) as album_count,
-        COUNT(DISTINCT r.mbid) as release_count,
-        COUNT(DISTINCT t.mbid) as track_count
+        COUNT(r.mbid) as release_count,
+        COALESCE(SUM(r.track_count), 0) as track_count
       FROM artists a
       LEFT JOIN artist_release_groups arg ON arg.artist_mbid = a.mbid
       LEFT JOIN releases r ON r.release_group_mbid = arg.release_group_mbid
-      LEFT JOIN tracks t ON t.release_mbid = r.mbid
       WHERE a.mbid = $1
       GROUP BY a.mbid
     `, [mbid]);
@@ -361,12 +186,11 @@ class Database {
         rg.primary_type,
         rg.first_release_date,
         rg.last_updated_at,
-        COUNT(DISTINCT r.mbid) as release_count,
-        COUNT(DISTINCT t.mbid) as track_count
+        COUNT(r.mbid) as release_count,
+        COALESCE(SUM(r.track_count), 0) as track_count
       FROM release_groups rg
       JOIN artist_release_groups arg ON arg.release_group_mbid = rg.mbid
       LEFT JOIN releases r ON r.release_group_mbid = rg.mbid
-      LEFT JOIN tracks t ON t.release_mbid = r.mbid
       WHERE arg.artist_mbid = $1
       GROUP BY rg.mbid, rg.title, rg.primary_type, rg.first_release_date, rg.last_updated_at
       ORDER BY rg.first_release_date DESC NULLS LAST

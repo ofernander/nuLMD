@@ -5,6 +5,9 @@ const WikipediaProvider = require('../providers/wikipedia');
 const CoverArtArchiveProvider = require('../providers/coverartarchive');
 const FanartTVProvider = require('../providers/fanart');
 const DeezerProvider = require('../providers/deezer');
+const { resolveMusicBrainzSources } = require('./mbSources');
+const LmdUpstreamProvider = require('../providers/lmdupstream');
+const { SourcePool, PoolSource, PooledMusicBrainz } = require('./sourcePool');
 
 class ProviderRegistry {
   constructor() {
@@ -43,13 +46,10 @@ class ProviderRegistry {
         providerConfig = { enabled: true };
       }
 
-      // Special handling for Fanart: prioritize environment variable
-      if (name === 'fanart' && process.env.FANART_API_KEY) {
-        providerConfig = {
-          ...providerConfig,
-          enabled: true,
-          apiKey: process.env.FANART_API_KEY
-        };
+      // Fanart has no switch: it is on exactly when it has a key (the environment's key wins over the saved one)
+      if (name === 'fanart') {
+        const fanart = config.fanartSettings();
+        providerConfig = { ...providerConfig, enabled: fanart.enabled, apiKey: fanart.apiKey };
       }
       
       // Always initialize mandatory providers, check enabled flag for optional ones
@@ -57,16 +57,12 @@ class ProviderRegistry {
       
       if (shouldInitialize) {
         try {
-          const provider = new ProviderClass(providerConfig);
-          await provider.initialize();
+          const provider = name === 'musicbrainz'
+            ? await this.buildMusicBrainzPool(providerConfig)
+            : new ProviderClass(providerConfig);
+          if (name !== 'musicbrainz') await provider.initialize();
           this.providers.set(name, provider);
           logger.info(`Provider initialized: ${name}`);
-          
-          // Log MusicBrainz server URL
-          if (name === 'musicbrainz') {
-            const mbUrl = providerConfig.baseUrl || process.env.MUSICBRAINZ_URL || 'https://musicbrainz.org/ws/2';
-            logger.info(`MusicBrainz server: ${mbUrl}`);
-          }
         } catch (error) {
           logger.error(`Failed to initialize provider ${name}:`, error);
         }
@@ -77,6 +73,39 @@ class ProviderRegistry {
 
     this.initialized = true;
     logger.info(`Provider registry initialized with ${this.providers.size} active providers`);
+  }
+
+  // MusicBrainz is a pool of one or more equivalent sources (MB servers and, optionally,
+  // Lidarr metadata upstreams) behind a single provider facade
+  async buildMusicBrainzPool(providerConfig) {
+    const resolved = resolveMusicBrainzSources(providerConfig).filter(s => s.enabled);
+    if (!resolved.some(s => s.type === 'musicbrainz')) throw new Error('No enabled MusicBrainz sources');
+    const multi = resolved.length > 1;
+
+    const sources = [];
+    for (const r of resolved) {
+      const host = r.url.replace(/^https?:\/\//, '').split('/')[0];
+      const base = { baseUrl: r.url, rateLimitMs: r.rateLimitMs, label: multi ? host : undefined, singleAttempt: multi };
+      const provider = r.type === 'lmd'
+        ? new LmdUpstreamProvider({ ...base, enabledOps: r.enabledOps })
+        : new MusicBrainzProvider(base);
+      await provider.initialize();
+      sources.push(new PoolSource({ ...r, id: host }, provider));
+      logger.info(`${r.type === 'lmd' ? 'LMD upstream' : 'MusicBrainz source'}: ${r.url} (priority ${r.priority}, rate limit ${r.rateLimitMs ? r.rateLimitMs + 'ms' : 'none'}${r.fromEnv ? ', from env' : ''})`);
+    }
+
+    const pool = new SourcePool(sources, { retryProfile: m => MusicBrainzProvider.retryProfile(m) });
+    return new PooledMusicBrainz(pool);
+  }
+
+  // Rebuild the MusicBrainz pool from current config and swap it in. Callers look the provider
+  // up per call, so new calls use the new pool while in-flight ones finish on the old one.
+  // On failure the old pool stays in place.
+  async reloadMusicBrainz() {
+    const pooled = await this.buildMusicBrainzPool(config.get('providers.musicbrainz', {}) || {});
+    this.providers.set('musicbrainz', pooled);
+    logger.info(`MusicBrainz pool reloaded: ${pooled.getStatus().length} source(s)`);
+    return pooled;
   }
 
   getProvider(name) {

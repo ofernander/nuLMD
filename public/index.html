@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>nuLMD</title>
-    <link rel="stylesheet" href="/css/core.css?v=42">
+    <link rel="stylesheet" href="/css/core.css?v=59">
 </head>
 <body>
     <div class="container">
@@ -13,7 +13,7 @@
                 <div style="display: flex; align-items: center; justify-content: space-between; width: 100%;">
                     <div>
                         <h1>nuLMD</h1>
-                        <p class="subtitle">New Lidarr Metadata Server</p>
+                        <p class="subtitle">Lidarr Metadata Proxy & Caching Server</p>
                     </div>
                     <div style="display: flex; align-items: center; gap: 1rem;">
                         <img src="/assets/lidarr.png" alt="Lidarr" style="height: 3rem;">
@@ -30,6 +30,19 @@
             <button class="tab" data-tab="sources">Metadata Sources</button>
             <button class="tab" data-tab="logs">Logs</button>
             <button class="tab" data-tab="settings">Settings</button>
+            <div class="menu" id="controlsMenu">
+                <button class="btn btn-secondary menu-trigger" aria-haspopup="true" aria-expanded="false">Controls <span aria-hidden="true">&#9662;</span></button>
+                <div class="menu-panel" role="menu" hidden>
+                    <button class="menu-item" role="menuitem" onclick="ui.clearJobQueue()">Clear Pending Jobs</button>
+                    <button class="menu-item" role="menuitem" onclick="ui.clearDownloadQueue()">Clear Pending Downloads</button>
+                    <button class="menu-item danger" role="menuitem" onclick="ui.killActiveJobs()">Kill Active Jobs</button>
+                    <div class="menu-divider" role="separator"></div>
+                    <button class="menu-item danger" role="menuitem" onclick="ui.pruneImagesNotInLidarr(this)">Trim Images Not in Lidarr</button>
+                    <button class="menu-item danger" role="menuitem" onclick="ui.pruneMetadataNotInLidarr(this)">Trim Metadata Not in Lidarr</button>
+                    <div class="menu-divider" role="separator"></div>
+                    <button class="menu-item" role="menuitem" onclick="ui.restartServer()">Restart Server</button>
+                </div>
+            </div>
         </nav>
 
         <main>
@@ -61,6 +74,7 @@
                         <div class="stat">
                             <div class="stat-label">Artists Cached</div>
                             <div class="stat-value" id="dashboardArtistCount">-</div>
+                            <div class="stat-sub" id="dashboardCatalogs"></div>
                         </div>
                         <div class="stat">
                             <div class="stat-label">Albums Cached</div>
@@ -85,21 +99,31 @@
                 <div class="card">
                     <h2>Requests</h2>
                     <div id="connectionsCard" class="conn-container">
-                        <div class="conn-empty">No connections yet</div>
+                        <div class="conn-empty">No requests yet</div>
                     </div>
                 </div>
 
                 <div class="card">
-                    <h2>Database Jobs</h2>
-                    <div id="jobQueueCard" class="job-queue-container">
-                        <div class="job-queue-empty">No jobs yet</div>
+                    <h2>Responses</h2>
+                    <div id="responsesCard" class="conn-container">
+                        <div class="conn-empty">No responses yet</div>
                     </div>
                 </div>
 
-                <div class="card">
-                    <h2>Download Jobs</h2>
-                    <div id="downloadJobsCard" class="job-queue-container">
-                        <div class="job-queue-empty">No downloads yet</div>
+                <div class="dash-pair">
+                    <div class="card">
+                        <h2>Database Jobs</h2>
+                        <div id="sourcesStrip" class="src-strip" hidden></div>
+                        <div id="jobQueueCard" class="job-queue-container">
+                            <div class="job-queue-empty">No jobs yet</div>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <h2>Download Jobs</h2>
+                        <div id="downloadJobsCard" class="job-queue-container">
+                            <div class="job-queue-empty">No downloads yet</div>
+                        </div>
                     </div>
                 </div>
             </section>
@@ -135,6 +159,12 @@
             <!-- Metadata Sources Tab -->
             <section id="sources-tab" class="tab-content">
                 <div class="card">
+                    <h2>Metadata Servers</h2>
+                    <small class="form-text" style="display:block; margin-bottom: 1rem;">Where nuLMD gets MusicBrainz-style metadata. Add more MusicBrainz servers to spread the load, or a Lidarr metadata server for much faster answers. Lower priority numbers are tried first; servers sharing a priority take turns, and a busy or failing server hands its requests to the next priority.</small>
+                    <div id="sourcesEditor">Loading...</div>
+                </div>
+
+                <div class="card">
                     <h2>Enabled Metadata Providers</h2>
                     <div id="providerCards" class="provider-grid-simple">
                         <p>Loading providers...</p>
@@ -142,7 +172,7 @@
                 </div>
 
                 <div class="card">
-                    <h2>Metadata Sources</h2>
+                    <h2>Image &amp; Other Providers</h2>
                     <div id="metadataSourcesForm">Loading...</div>
                 </div>
             </section>
@@ -210,21 +240,54 @@
             <!-- Settings Tab -->
             <section id="settings-tab" class="tab-content">
                 <div class="card">
-                    <h2>Controls</h2>
-                    <div style="display: flex; gap: 1rem; flex-wrap: wrap; align-items: center;">
-                        <button class="btn btn-secondary" onclick="ui.clearJobQueue()">Clear Pending Jobs</button>
-                        <button class="btn btn-danger" onclick="ui.killActiveJobs()">Kill Active Jobs</button>
-                        <button class="btn btn-secondary" onclick="ui.clearDownloadQueue()">Clear Pending Downloads</button>
-                        <button class="btn btn-secondary" onclick="ui.restartServer()">Restart Server</button>
+                    <h2>Metadata Retention</h2>
+                    <small class="form-text" style="display:block; margin-bottom: 1rem;">How long cached artist/album metadata stays fresh before nuLMD re-fetches it from MusicBrainz on the next Lidarr request. Default 30 days.</small>
+                    <div class="form-group">
+                        <label for="settings.metadata.ttlDays">TTL (days)</label>
+                        <input type="number" class="form-control" id="settings.metadata.ttlDays" min="1" max="3650" style="width:120px;">
+                    </div>
+                    <button class="btn btn-primary" onclick="ui.saveRetention()">Save</button>
+                </div>
+
+                <div class="card">
+                    <h2>Metadata Blocklist</h2>
+                    <small class="form-text" style="display:block; margin-bottom: 1rem;">Artists, release groups and releases nuLMD never fetches or stores, and never queues a job for. Block one from the Metadata Browser, or add it here by MusicBrainz ID (the only way to block a single release). Anything in Lidarr's library cannot be blocked.</small>
+                    <div id="blocklistList" class="blocklist-list">Loading...</div>
+                    <div style="display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: center; margin-top: 1rem;">
+                        <select id="blockType" class="form-control" style="width: 150px;">
+                            <option value="artist">Artist</option>
+                            <option value="release_group">Release group</option>
+                            <option value="release">Release</option>
+                        </select>
+                        <input type="text" id="blockMbid" class="form-control" placeholder="MusicBrainz ID" style="flex: 1; min-width: 280px;">
+                        <button class="btn btn-danger" onclick="ui.addBlock(this)">Block and Clear</button>
                     </div>
                 </div>
 
                 <div class="card">
-                    <h2>Lidarr Integration</h2>
-                    <small class="form-text" style="display:block; margin-bottom: 1rem;">Connect to your Lidarr instance to trigger automatic metadata refreshes after nuLMD fetches new data.</small>
-                    <div class="form-group">
-                        <label for="settings.lidarr.enabled"><input type="checkbox" id="settings.lidarr.enabled"> Enabled</label>
+                    <h2>MusicBrainz API</h2>
+                    <div id="ws2KeysStatus" class="backfill-status">Loading...</div>
+                    <div id="ws2KeysList" class="key-list"></div>
+                    <div class="form-group" style="margin-top: 1rem;">
+                        <label for="ws2.keyLabel">New key</label>
+                        <div style="display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap;">
+                            <input type="text" class="form-control" id="ws2.keyLabel" maxlength="60" placeholder="Name it, e.g. Picard laptop" style="max-width: 320px;" onkeydown="if (event.key === 'Enter') ui.createWs2Key()">
+                            <button class="btn btn-primary" onclick="ui.createWs2Key()">Generate Key</button>
+                        </div>
                     </div>
+                    <div id="ws2NewKey" class="key-reveal" hidden>
+                        <div><b>Copy this key now.</b> It is not stored and cannot be shown again.</div>
+                        <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem;">
+                            <input type="text" class="form-control" id="ws2NewKeyValue" readonly onclick="this.select()">
+                            <button class="btn btn-secondary" onclick="ui.copyWs2Key()">Copy</button>
+                        </div>
+                    </div>
+                    <small class="form-text" style="display:block; margin-top: 1rem;">Point apps at <code id="ws2Endpoint"></code>. They send the key in an <code>X-API-Key</code> header, as <code>Authorization: Bearer &lt;key&gt;</code>, or as <code>?apikey=&lt;key&gt;</code> on the URL.</small>
+                </div>
+
+                <div class="card">
+                    <h2>Lidarr Integration</h2>
+                    <small class="form-text" id="lidarrState" style="display:block; margin-bottom: 0.75rem;"></small>
                     <div class="form-group">
                         <label for="settings.lidarr.url">Lidarr URL</label>
                         <input type="text" class="form-control" id="settings.lidarr.url" placeholder="http://localhost:8686">
@@ -249,7 +312,7 @@
         </footer>
     </div>
 
-    <script src="/js/main.js?v=42"></script>
-    <script src="/js/ui.js?v=42"></script>
+    <script src="/js/main.js?v=49"></script>
+    <script src="/js/ui.js?v=58"></script>
 </body>
 </html>

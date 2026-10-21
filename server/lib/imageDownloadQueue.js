@@ -1,6 +1,7 @@
 const database = require('../sql/database');
 const { logger } = require('./logger');
 const imageDownloader = require('./imageDownloader');
+const config = require('./config');
 
 /**
  * Dedicated image download queue processor
@@ -10,13 +11,15 @@ const imageDownloader = require('./imageDownloader');
 class ImageDownloadQueue {
   constructor() {
     this.activeWorkers = 0;
-    this.maxWorkers = 3;
+    this.maxWorkers = 6;
     this.processInterval = null;
     this.lastDownloadTime = {}; // Track last download time per provider
-    
+    this.inFlight = new Set();  // ids being downloaded right now
+    this.retryAfterMs = 60 * 60 * 1000;   // a failed download is tried again an hour after it failed
+
     // Provider-specific rate limits (milliseconds between requests)
     this.providerRateLimits = {
-      'coverartarchive': 2500,  // 2.5s - conservative for 30 req/min limit
+      'coverartarchive': Number(config.get('providers.coverartarchive.rateLimitMs', 1000)),  // same pace as its API calls
       'theaudiodb': 1000,       // 1s - conservative
       'fanart': 500,            // 0.5s - they allow 2 req/s
       'deezer': 1000,           // 1s - conservative for free tier
@@ -25,25 +28,33 @@ class ImageDownloadQueue {
   }
 
   /**
-   * Get next pending download from images table
-   * Returns full image record including provider for rate limiting
+   * Get the next download that can start now: the head of each provider's queue is considered (waiting downloads before
+   * retries, artist images first, then oldest), and the first whose provider is outside its rate-limit window and which is
+   * not already being downloaded wins. A provider that has to wait therefore never holds up the others.
+   * A retry is a download that failed (transiently) at least `retryAfterMs` ago and has failed fewer than
+   * `maxAutoRetries` times; failures from before the count existed are not retried (refresh them in the image explorer).
+   * Returns the image record's id and provider for rate limiting.
    */
   async getNextDownload() {
     try {
-      // Find images that need downloading (not cached, not failed)
-      // Prioritize artist images first (Lidarr requests these first)
       const result = await database.query(`
-        SELECT id, provider
+        SELECT DISTINCT ON (provider) id, provider, entity_type, last_verified_at, cache_failed
         FROM images
-        WHERE cached = false 
-        AND cache_failed = false
-        ORDER BY 
+        WHERE cached = false
+        AND (cache_failed = false
+             OR (download_failures < $2 AND last_failed_at IS NOT NULL AND last_failed_at <= $3))
+        AND id <> ALL($1::bigint[])
+        ORDER BY provider,
+          cache_failed ASC,
           CASE WHEN entity_type = 'artist' THEN 0 ELSE 1 END,
           last_verified_at ASC
-        LIMIT 1
-      `);
+      `, [[...this.inFlight], imageDownloader.maxAutoRetries, new Date(Date.now() - this.retryAfterMs)]);
 
-      return result.rows[0] || null;
+      const heads = result.rows.sort((a, b) =>
+        (a.cache_failed ? 1 : 0) - (b.cache_failed ? 1 : 0) ||
+        (a.entity_type === 'artist' ? 0 : 1) - (b.entity_type === 'artist' ? 0 : 1) ||
+        new Date(a.last_verified_at) - new Date(b.last_verified_at));
+      return heads.find(row => this.canDownloadFromProvider(row.provider || 'default')) || null;
     } catch (error) {
       logger.error('Failed to get next download:', error);
       return null;
@@ -74,9 +85,9 @@ class ImageDownloadQueue {
 
   /**
    * Start the download processor
-   * @param {number} intervalMs - How often to check for downloads (default 2000ms)
+   * @param {number} intervalMs - How often to check for downloads (default 500ms)
    */
-  async startProcessor(intervalMs = 2000) {
+  async startProcessor(intervalMs = 500) {
     if (this.processInterval) {
       logger.warn('Image download processor already running');
       return;
@@ -84,33 +95,34 @@ class ImageDownloadQueue {
 
     logger.info('Starting image download queue processor');
 
-    this.processInterval = setInterval(async () => {
-      if (this.activeWorkers >= this.maxWorkers) return;
+    this.processInterval = setInterval(() => this._fillWorkers(), intervalMs);
+  }
 
-      try {
+  // Start a download on every free worker whose provider is ready, not one per tick, and again as each download ends
+  async _fillWorkers() {
+    if (this._filling) return;
+    this._filling = true;
+    try {
+      while (this.activeWorkers < this.maxWorkers) {
         const download = await this.getNextDownload();
+        if (!download) break;
 
-        if (download) {
-          const provider = download.provider || 'default';
-
-          // Check if we can download from this provider (rate limiting)
-          if (!this.canDownloadFromProvider(provider)) {
-            const rateLimit = this.providerRateLimits[provider] || this.providerRateLimits.default;
-            logger.debug(`Rate limit active for ${provider}, waiting ${rateLimit}ms between requests`);
-            return;
-          }
-
-          logger.debug(`Processing download for image ${download.id} from ${provider} [worker ${this.activeWorkers + 1}/${this.maxWorkers}]`);
-          this.activeWorkers++;
-          this.recordDownload(provider);
-          this._runDownload(download.id).finally(() => {
-            this.activeWorkers--;
-          });
-        }
-      } catch (error) {
-        logger.error('Image download processor error:', error);
+        const provider = download.provider || 'default';
+        logger.debug(`Processing download for image ${download.id} from ${provider} [worker ${this.activeWorkers + 1}/${this.maxWorkers}]`);
+        this.activeWorkers++;
+        this.inFlight.add(String(download.id));
+        this.recordDownload(provider);
+        this._runDownload(download.id).finally(() => {
+          this.activeWorkers--;
+          this.inFlight.delete(String(download.id));
+          if (this.processInterval) this._fillWorkers();
+        });
       }
-    }, intervalMs);
+    } catch (error) {
+      logger.error('Image download processor error:', error);
+    } finally {
+      this._filling = false;
+    }
   }
 
   async _runDownload(imageId) {
@@ -129,7 +141,7 @@ class ImageDownloadQueue {
   async _checkRefreshAsync(imageId) {
     const backgroundJobQueue = require('./backgroundJobQueue');
     const imgResult = await database.query(
-      `SELECT entity_type, entity_mbid FROM images WHERE id = $1 AND cached = true`,
+      `SELECT entity_type, entity_mbid FROM images WHERE id = $1`,
       [imageId]
     );
     if (imgResult.rows.length === 0) return;

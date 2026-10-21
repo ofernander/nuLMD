@@ -8,7 +8,8 @@ const { logger, setLogLevel } = require('./lib/logger');
 const config = require('./lib/config');
 const database = require('./sql/database');
 const routes = require('./lib/routes');
-const { logConnection, init: initRequestLog } = require('./lib/request');
+const replySummary = require('./lib/replySummary');
+const { logConnection, clientOf, init: initRequestLog, trackRequest, trackImage, flushImageBursts } = require('./lib/request');
 const metaHandler = require('./lib/metaHandler');
 const { registry } = require('./lib/providerRegistry');
 const { initializeProviders } = require('./lib/providerRegistry');
@@ -17,6 +18,7 @@ const backgroundJobQueue = require('./lib/backgroundJobQueue');
 const { processJob } = require('./lib/jobProcessor');
 const imageDownloadQueue = require('./lib/imageDownloadQueue');
 const lidarrClient = require('./lib/lidarrClient');
+const blocklist = require('./lib/blocklist');
 
 const app = express();
 const PORT = process.env.PORT || 5001;
@@ -44,6 +46,14 @@ app.use((req, res, next) => {
   next();
 });
 
+// The request card: what each of these requests has nuLMD call on its way to an answer is kept on its row
+app.use(['/artist', '/album', '/search', '/ws/2'], trackRequest);
+
+// ...and the image files Lidarr pulls from nuLMD (and the placeholder it is sent for a cover that is not there yet),
+// grouped into one row per burst. Before the static files, which serve the placeholder.
+app.get('/api/images/:type/:mbid/:file', trackImage);
+app.get('/assets/placeholder.png', trackImage);
+
 // Serve static files for Web UI
 app.use(express.static(path.join(__dirname, '../public')));
 
@@ -52,22 +62,39 @@ app.get('/artist/:mbid', async (req, res) => {
   try {
     const { mbid } = req.params;
     logger.info(`Lidarr artist request: ${mbid}`);
-    const formatted = await metaHandler.ensureArtist(mbid);
+    const started = Date.now();
+    const served = {};
+    const formatted = await metaHandler.ensureArtist(mbid, served);
+    const blocked = blocklist.isBlocked('artist', mbid);
+    const catalogPending = !blocked && await metaHandler.catalogDue(mbid);
     logConnection({
         direction: 'inbound',
         label: 'Artist Lookup',
         detail: formatted.artistname || mbid.substring(0, 8) + '...',
-        status: 'ok'
+        status: 'ok',
+        api: 'LMD',
+        outcome: served.how || null,
+        reply: replySummary.describeArtist(formatted, { catalogPending }),
+        durationMs: Date.now() - started,
+        ...clientOf(req)
     });
 
-    // Always queue fetch_artist_albums — queueJob is idempotent, completed jobs are left alone.
-    // TTL is a DB concern handled inside ensureArtist; it has no bearing on whether to notify Lidarr.
-    backgroundJobQueue.queueJob('fetch_artist_albums', 'artist', mbid, 1, null, null, mbid)
-      .catch(err => logger.error(`Failed to queue fetch_artist_albums for ${mbid}:`, err));
+    // The catalog (every release group and release, fetched in bulk) is brought up in the background when it is
+    // missing or past its TTL. Until it is ready Lidarr is served what we hold, and is asked to refresh when done.
+    if (catalogPending) {
+      backgroundJobQueue.forceQueueJob('fetch_artist_albums', 'artist', mbid, 1, { via: 'artist-request' }, null, mbid)
+        .catch(err => logger.error(`Failed to queue fetch_artist_albums for ${mbid}:`, err));
+    } else if (!blocked && await metaHandler.imagesDue(mbid)) {
+      // Held from an earlier preview and now in Lidarr: only the image lookups are missing, and Lidarr is refreshed when they are done
+      backgroundJobQueue.forceQueueJob('fetch_artist_albums', 'artist', mbid, 1, { imagesOnly: true, via: 'artist-request' }, null, mbid)
+        .catch(err => logger.error(`Failed to queue the image catch-up for ${mbid}:`, err));
+    }
 
     res.json(formatted);
   } catch (error) {
     logger.error(`Error on artist request ${req.params.mbid}:`, error);
+    logConnection({ direction: 'inbound', label: 'Artist Lookup', detail: req.params.mbid.substring(0, 8) + '...', status: 'error', api: 'LMD',
+        outcome: `error: ${error.message}`, ...clientOf(req) });
     res.status(500).json({ error: error.message });
   }
 });
@@ -76,7 +103,9 @@ app.get('/album/:mbid', async (req, res) => {
   try {
     const { mbid } = req.params;
     logger.info(`Lidarr album request: ${mbid}`);
-    const { formatted, needsFullFetch } = await metaHandler.ensureAlbum(mbid);
+    const started = Date.now();
+    const { formatted, needsFullFetch, served } = await metaHandler.ensureAlbum(mbid);
+    metaHandler.queueCatalogForAlbum(mbid);   // not awaited: the reply must not wait for it
     if (needsFullFetch) {
       backgroundJobQueue.queueJob('fetch_album_full', 'release_group', mbid, 1)
         .catch(err => logger.error(`Failed to queue fetch_album_full for ${mbid}:`, err));
@@ -85,12 +114,24 @@ app.get('/album/:mbid', async (req, res) => {
         direction: 'inbound',
         label: 'Album Lookup',
         detail: formatted.title || mbid.substring(0, 8) + '...',
-        status: 'ok'
+        status: 'ok',
+        api: 'LMD',
+        outcome: served || null,
+        reply: replySummary.describeAlbum(formatted),
+        durationMs: Date.now() - started,
+        ...clientOf(req)
     });
 
     res.json(formatted);
   } catch (error) {
+    if (error.blocked) {
+      logConnection({ direction: 'inbound', label: 'Album Lookup', detail: req.params.mbid.substring(0, 8) + '...', status: 'ok', api: 'LMD',
+          outcome: 'blocked', reply: 'not found (blocked)', ...clientOf(req) });
+      return res.status(404).json({ error: 'Not found' });
+    }
     logger.error(`Error on album request ${req.params.mbid}:`, error);
+    logConnection({ direction: 'inbound', label: 'Album Lookup', detail: req.params.mbid.substring(0, 8) + '...', status: 'error', api: 'LMD',
+        outcome: `error: ${error.message}`, ...clientOf(req) });
     res.status(500).json({ error: error.message });
   }
 });
@@ -98,32 +139,36 @@ app.get('/album/:mbid', async (req, res) => {
 // Lidarr search - delegates to search.js, replicates oldLMD /search behavior
 app.get('/search', async (req, res) => {
   try {
-    const { query, type, limit = 10, artist, includeTracks } = req.query;
+    const { query, type, limit = 5, artist, includeTracks } = req.query;
     if (!query) return res.json([]);
     logger.info(`Lidarr search: ${query} (type=${type})`);
-    logConnection({
-        direction: 'inbound',
-        label: 'Search',
-        detail: query.length > 30 ? query.substring(0, 30) + '…' : query,
-        status: 'ok'
-    });
+    const started = Date.now();
+    const searched = { direction: 'inbound', label: 'Search', detail: query.length > 30 ? query.substring(0, 30) + '…' : query, api: 'LMD', ...clientOf(req) };
     const results = await lidarrSearch(query, type, {
-      limit: parseInt(limit),
+      // Hard-cap at 5 regardless of what Lidarr requests — top matches are always near
+      // the top, and fewer results = less per-result formatting work.
+      limit: Math.min(parseInt(limit) || 5, 5),
       artist,
       includeTracks: includeTracks === '1' || includeTracks === 'true'
     });
     if (results.error) {
+      logConnection({ ...searched, status: 'error', outcome: `error: ${results.error}`, durationMs: Date.now() - started });
       return res.status(results.status).json({ error: results.error });
     }
+    logConnection({ ...searched, status: 'ok', reply: replySummary.describeSearch(results), durationMs: Date.now() - started });
     res.json(results);
   } catch (error) {
     logger.error(`Error in search endpoint:`, error);
+    const q = String(req.query.query || '');
+    logConnection({ direction: 'inbound', label: 'Search', detail: q.length > 30 ? q.substring(0, 30) + '…' : q, status: 'error', api: 'LMD',
+        outcome: `error: ${error.message}`, ...clientOf(req) });
     res.status(500).json({ error: error.message });
   }
 });
 
 // API Routes (internal, for Web UI)
 app.use('/api', routes);
+app.use('/ws/2', require('./lib/mbWs/routes').createRouter());
 
 // Health check
 app.get('/health', async (req, res) => {
@@ -211,8 +256,11 @@ async function start() {
     await database.initialize();
     logger.info('Database initialized');
 
+    // What the user has blocked is held in memory from here on (every store and queued job checks it)
+    await blocklist.load();
+
     // Load persisted request log from DB
-    await initRequestLog(database);
+    await initRequestLog(database, { retentionDays: Number(config.get('logs.requestLogDays', 30)) });
     logger.info('Request log initialized');
 
     // Initialize metadata providers
@@ -251,7 +299,12 @@ async function start() {
       logger.info(`API available at ${serverUrl}/api`);
     });
   } catch (error) {
-    logger.error('Failed to start server:', error);
+    if (error.code === 'NULMD_LEGACY_DB') {
+      // Not a crash to debug: the user has a v4 database and needs the upgrade steps, not a stack trace
+      logger.error(`\n${error.message}\n`);
+    } else {
+      logger.error('Failed to start server:', error);
+    }
     process.exit(1);
   }
 }
@@ -259,6 +312,7 @@ async function start() {
 // Graceful shutdown
 process.on('SIGTERM', () => {
   logger.info('SIGTERM received, shutting down gracefully');
+  flushImageBursts();   // an image burst still open is written out
   backgroundJobQueue.stopProcessor();
   imageDownloadQueue.stopProcessor();
   process.exit(0);
@@ -266,6 +320,7 @@ process.on('SIGTERM', () => {
 
 process.on('SIGINT', () => {
   logger.info('SIGINT received, shutting down gracefully');
+  flushImageBursts();   // an image burst still open is written out
   backgroundJobQueue.stopProcessor();
   imageDownloadQueue.stopProcessor();
   process.exit(0);

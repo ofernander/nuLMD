@@ -12,4 +12,8 @@ Icon?
 ._*
 *~
 docker-compose.override.yml
-docker-compose.override1.yml
+docker-compose.override.dev.yml
+docker-compose.override.2.yml
+docker-compose-lidarr.local_build
+tests/
+.claude/

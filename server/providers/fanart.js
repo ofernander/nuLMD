@@ -1,6 +1,7 @@
 const axios = require('axios');
 const { logger } = require('../lib/logger');
-const { logConnection } = require('../lib/request');
+const { logConnection, settleCall } = require('../lib/request');
+const { USER_AGENT } = require('../lib/userAgent');
 
 class FanartProvider {
   static capabilities = { artistImages: true, albumImages: false };
@@ -30,13 +31,14 @@ class FanartProvider {
     }
 
     try {
-      logConnection({ direction: 'outbound', label: 'Fanart', detail: `${this.baseURL}/music/${mbid}`, status: 'ok' });
-      const response = await axios.get(`${this.baseURL}/music/${mbid}`, {
+      const call = logConnection({ direction: 'outbound', label: 'Fanart', detail: `${this.baseURL}/music/${mbid}`, status: 'ok' });
+      const response = await settleCall(call, axios.get(`${this.baseURL}/music/${mbid}`, {
         params: {
           api_key: this.apiKey
         },
-        timeout: 10000
-      });
+        timeout: 10000,
+        headers: { 'User-Agent': USER_AGENT }
+      }));
 
       const data = response.data;
       const images = [];
@@ -115,13 +117,14 @@ class FanartProvider {
     }
 
     try {
-      logConnection({ direction: 'outbound', label: 'Fanart', detail: `${this.baseURL}/music/albums/${mbid}`, status: 'ok' });
-      const response = await axios.get(`${this.baseURL}/music/albums/${mbid}`, {
+      const call = logConnection({ direction: 'outbound', label: 'Fanart', detail: `${this.baseURL}/music/albums/${mbid}`, status: 'ok' });
+      const response = await settleCall(call, axios.get(`${this.baseURL}/music/albums/${mbid}`, {
         params: {
           api_key: this.apiKey
         },
-        timeout: 10000
-      });
+        timeout: 10000,
+        headers: { 'User-Agent': USER_AGENT }
+      }));
 
       const data = response.data;
       const images = [];
